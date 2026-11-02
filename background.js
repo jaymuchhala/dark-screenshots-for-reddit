@@ -1,0 +1,66 @@
+importScripts('detect.js');
+
+const IMAGE_HOSTS = new Set(['i.redd.it', 'preview.redd.it', 'external-preview.redd.it']);
+const MAX_FETCHES = 4;
+
+let running = 0;
+const waiting = [];
+
+async function withSlot(job) {
+  if (running >= MAX_FETCHES) await new Promise((resolve) => waiting.push(resolve));
+  running++;
+  try {
+    return await job();
+  } finally {
+    running--;
+    waiting.shift()?.();
+  }
+}
+
+// The page can't read the pixels of images from another host, but the worker can.
+async function checkImage(url) {
+  if (!IMAGE_HOSTS.has(new URL(url).hostname)) return false;
+  return withSlot(async () => {
+    const res = await fetch(url, { credentials: 'omit' });
+    if (!res.ok) return false;
+    return (await analyzeBlob(await res.blob())).screenshot;
+  });
+}
+
+// Development: when loaded unpacked (no update_url), reload when build.txt changes,
+// so edits on disk take effect without a trip to chrome://extensions. Each page load
+// pings the worker to trigger the check. The stamp seen at load is kept in session
+// storage, which outlives the worker going idle but is cleared by a reload.
+async function checkBuild() {
+  if ('update_url' in chrome.runtime.getManifest()) return;
+  try {
+    const stamp = (await (await fetch(chrome.runtime.getURL('build.txt'), { cache: 'no-store' })).text()).trim();
+    const { build } = await chrome.storage.session.get('build');
+    if (build === undefined) await chrome.storage.session.set({ build: stamp });
+    else if (stamp !== build) chrome.runtime.reload();
+  } catch (_) { /* no build.txt */ }
+}
+checkBuild();
+
+chrome.runtime.onMessage.addListener((msg, sender, reply) => {
+  if (sender.id !== chrome.runtime.id) return;
+  if (msg.type === 'check-build') checkBuild();
+  if (msg.type !== 'check-image') return;
+  checkImage(msg.url).then(reply, () => reply(false));
+  return true;
+});
+
+chrome.runtime.onInstalled.addListener(() => {
+  chrome.contextMenus.create({
+    id: 'toggle-dark',
+    title: 'Switch dark mode for this image',
+    contexts: ['image'],
+    documentUrlPatterns: ['https://*.reddit.com/*', 'https://reddit.com/*'],
+  });
+});
+
+chrome.contextMenus.onClicked.addListener((info, tab) => {
+  if (info.menuItemId === 'toggle-dark') {
+    chrome.tabs.sendMessage(tab.id, { type: 'toggle-image' }, { frameId: info.frameId }).catch(() => {});
+  }
+});

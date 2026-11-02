@@ -1,0 +1,9 @@
+# Changes on every edit (dev auto-reload stamp)
+build.txt
+# Local notes, kept on this computer only
+CLAUDE.md
+# Store and release zips
+dist/
+# Local tooling
+.claude/
+.DS_Store

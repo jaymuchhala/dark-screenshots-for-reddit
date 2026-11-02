@@ -1,0 +1,27 @@
+<!doctype html>
+<html>
+<head>
+  <meta charset="utf-8">
+  <link rel="stylesheet" href="popup.css">
+</head>
+<body>
+  <h1>Dark Screenshots</h1>
+
+  <label class="row">
+    <span><b>Screenshots I read</b><small>Darken bright screenshots on Reddit</small></span>
+    <input type="checkbox" id="reader" class="switch">
+  </label>
+  <div class="choices" id="readerMode">
+    <label><input type="radio" name="readerMode" value="theme"> When Chrome is in dark mode</label>
+    <label><input type="radio" name="readerMode" value="always"> Always</label>
+  </div>
+
+  <label class="row">
+    <span><b>Screenshots I upload</b><small>Make them dark before they reach Reddit</small></span>
+    <input type="checkbox" id="uploader" class="switch">
+  </label>
+
+  <p>Wrong call on an image? Right-click it and choose "Switch dark mode for this image".</p>
+  <script src="popup.js"></script>
+</body>
+</html>
