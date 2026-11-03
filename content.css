@@ -1,6 +1,6 @@
 /* Shown over a video player while its video is being checked: the extension's icon,
    with its light and dark sides sweeping left to right as it slowly grows and shrinks,
-   above a short message. */
+   beside a short message, at the right edge a quarter of the way down. */
 [data-applying-dark] {
   position: relative !important;
 }
@@ -16,31 +16,34 @@
 [data-applying-dark]::before {
   content: "";
   z-index: 2;
-  top: calc(50% - 36px);
-  left: calc(50% - 22px);
-  width: 44px;
-  height: 44px;
+  top: calc(25% - 11px);
+  right: 10px;
+  width: 22px;
+  height: 22px;
   border-radius: 22%;
-  background: linear-gradient(135deg, #f6f7f8, #181b1e 25%, #f6f7f8 50%, #181b1e 75%, #f6f7f8) 0 0 / 88px 88px;
+  background: linear-gradient(135deg, #f6f7f8, #181b1e 25%, #f6f7f8 50%, #181b1e 75%, #f6f7f8) 0 0 / 44px 44px;
   animation:
     dark-screenshots-fade 0.2s ease-out 0.25s both,
     dark-screenshots-sweep 2s linear infinite,
     dark-screenshots-pulse 1.4s ease-in-out infinite alternate;
 }
 
-/* The delay keeps it from blinking on a reload, when the wait is very short. */
+/* The delay keeps it from blinking on a reload, when the wait is very short.
+   Padding can't be a percent of the height, so the text sits at the bottom of a grid
+   row that ends just past 25%, which centers it on the icon. */
 [data-applying-dark]::after {
   content: "Applying dark mode...";
   z-index: 1;
   inset: 0;
-  display: flex;
-  align-items: center;
-  justify-content: center;
-  padding-top: 54px;
+  display: grid;
+  grid-template-rows: calc(25% + 8px);
+  align-items: end;
+  justify-items: end;
+  padding-right: 39px;
   box-sizing: border-box;
   background: #0e1113;
   color: #f2f4f5;
-  font: 13px/1.4 system-ui, sans-serif;
+  font: 11px/16px system-ui, sans-serif;
   animation: dark-screenshots-fade 0.2s ease-out 0.25s both;
 }
 
@@ -50,7 +53,7 @@
 }
 
 @keyframes dark-screenshots-sweep {
-  to { background-position-x: 88px; }
+  to { background-position-x: 44px; }
 }
 
 @keyframes dark-screenshots-pulse {
