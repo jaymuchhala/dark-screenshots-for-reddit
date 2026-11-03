@@ -1,12 +1,12 @@
 # Loads a copy of the extension pointed at localhost and runs it on a mock page.
-# usage: python3 test/run.py [detector] [reader] [upload] [video] [popup]
+# usage: python3 test/run.py [detector] [reader] [upload] [video] [popup] [ai]
 # With no names it runs them all. Screenshots come from test/shots in the main checkout, so
 # worktrees share them. Each run has its own work folder, printed at the start.
 import base64, hashlib, http.server, json, os, shutil, subprocess, sys, tempfile, threading, functools, glob, time
 from playwright.sync_api import sync_playwright
 
 ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
-SECTIONS = ('detector', 'reader', 'upload', 'video', 'popup')
+SECTIONS = ('detector', 'reader', 'upload', 'video', 'popup', 'ai')
 chosen = sys.argv[1:] or SECTIONS
 if set(chosen) - set(SECTIONS): sys.exit(f'sections: {", ".join(SECTIONS)}')
 def want(section): return section in chosen
@@ -20,6 +20,50 @@ shutil.copytree(ROOT, ext, ignore=shutil.ignore_patterns('test', '.git', '.claud
 for name in ('background.js', 'content.js'):
     s = open(f'{ext}/{name}').read().replace("'i.redd.it'", "'localhost'")
     open(f'{ext}/{name}', 'w').write(s)
+# A pretend Ollama, and a pretend built-in model that a test can turn on from storage.
+fake_ollama = {'up': False, 'answer': 'no', 'asked': 0, 'images': 0, 'delay': 0, 'fail': False}
+class FakeOllama(http.server.BaseHTTPRequestHandler):
+    def log_message(self, *a): pass
+    def send(self, code, data):
+        body = json.dumps(data).encode()
+        self.send_response(code); self.send_header('Content-Length', str(len(body))); self.end_headers(); self.wfile.write(body)
+    def do_GET(self):
+        if self.path == '/nano': self.send(200, {'answer': fake_ollama.get('nano')})
+        elif fake_ollama['up']: self.send(200, {'models': [{'name': 'big', 'size': 9}, {'name': 'text', 'size': 1}, {'name': 'seer', 'size': 5}]})
+        else: self.send(503, {})
+    def do_POST(self):
+        body = json.loads(self.rfile.read(int(self.headers['Content-Length'])))
+        if self.path == '/nano':
+            fake_ollama['nano_got_image'] = body['image']
+            return self.send(200, {})
+        if self.path == '/api/show': return self.send(200, {'capabilities': ['completion'] + (['vision'] if body['model'] != 'text' else [])})
+        fake_ollama['asked'] += 1
+        fake_ollama['model'] = body['model']
+        fake_ollama['images'] += len(body['messages'][0].get('images', []))
+        time.sleep(fake_ollama['delay'])
+        if fake_ollama['fail']: return self.send(500, {})
+        self.send(200, {'message': {'content': json.dumps({'screen': fake_ollama['answer']})}})
+ollama_srv = http.server.ThreadingHTTPServer(('localhost', 0), FakeOllama)
+threading.Thread(target=ollama_srv.serve_forever, daemon=True).start()
+s = open(f'{ext}/ai.js').read().replace('http://localhost:11434', f'http://localhost:{ollama_srv.server_port}')
+open(f'{ext}/ai.js', 'w').write(s)
+# Offscreen documents have no chrome.storage, so the pretend model asks the pretend server.
+open(f'{ext}/fake-nano.js', 'w').write(f"""
+const nanoServer = 'http://localhost:{ollama_srv.server_port}/nano';
+const nanoAnswer = async () => (await (await fetch(nanoServer)).json()).answer;
+globalThis.LanguageModel = {{
+  availability: async () => await nanoAnswer() ? 'available' : 'unavailable',
+  create: async () => ({{
+    clone() {{ return this; }},
+    destroy() {{}},
+    prompt: async (content) => {{
+      await fetch(nanoServer, {{ method: 'POST', body: JSON.stringify({{ image: content[0].content[1].value instanceof Blob }}) }});
+      return JSON.stringify({{ screen: await nanoAnswer() }});
+    }},
+  }}),
+}};""")
+s = open(f'{ext}/offscreen.html').read().replace('<script src="ai.js">', '<script src="fake-nano.js"></script><script src="ai.js">')
+open(f'{ext}/offscreen.html', 'w').write(s)
 m = json.load(open(f'{ext}/manifest.json'))
 m['host_permissions'] = ['http://localhost/*']
 m['content_scripts'][0]['matches'] = ['http://localhost/*']
@@ -546,6 +590,130 @@ with sync_playwright() as p:
         check('popup: frames starts ticked', pop.locator('#frames').is_checked())
         pop.locator('#frames').click(); pop.wait_for_timeout(100)
         check('popup: frames saves', sw.evaluate("chrome.storage.local.get('settings')")['settings']['frames'] is False)
+
+    if want('ai'):
+        # The AI check, on copies of the screenshots so nothing else has a verdict on them.
+        for i in range(1, 9): shutil.copy(f'{site}/shot1.png', f'{site}/ai{i}.png')
+        ALWAYS = "reader:true, readerMode:'always', uploader:true, tinted:true"
+        def ai_settings(engine):
+            sw.evaluate("e => chrome.storage.local.set({settings:{" + ALWAYS + ", aiEngine:e}}).then(() => { aiPickedAt = 0; })", engine)
+        def ai_page(name):
+            pg = ctx.new_page(); pg.goto(base + '/index.html')
+            pg.evaluate("n => { const i = new Image(); i.src = '/' + n; i.id = 't'; i.style.cssText = 'width:300px;height:200px'; document.body.prepend(i); }", name)
+            return pg
+        def ai_shown(pg): return pg.evaluate("(() => { const i = document.getElementById('t'); return i.style.visibility !== 'hidden' && !i.style.objectPosition; })()")
+        def ai_dark(pg):
+            pg.wait_for_timeout(800)
+            until(lambda: ai_shown(pg), 15000)
+            return 'invert' in pg.evaluate("document.getElementById('t').style.filter")
+
+        ai_settings('auto')
+        pg = ai_page('ai1.png')
+        check('ai: nothing running, the checks decide', lambda: 'invert' in pg.evaluate("document.getElementById('t').style.filter")); pg.close()
+
+        fake_ollama.update(up=True, answer='no', delay=3.5)
+        ai_settings('auto')
+        pg = ai_page('ai2.png')
+        pg.wait_for_timeout(3000)
+        check('ai: held past the usual reveal while asking', not ai_shown(pg))
+        check('ai: no means no darkening', not ai_dark(pg))
+        check('ai: asked once, with an image, the smallest vision model', fake_ollama['asked'] == 1 and fake_ollama['images'] == 1 and fake_ollama['model'] == 'seer', fake_ollama)
+        pg.close()
+        pg = ai_page('ai2.png')
+        check('ai: saved answer stays', not ai_dark(pg))
+        check('ai: saved answer needs no new call', fake_ollama['asked'] == 1); pg.close()
+
+        fake_ollama.update(answer='yes', delay=0)
+        pg = ai_page('ai3.png')
+        check('ai: yes darkens', ai_dark(pg))
+        check('ai: photos are never sent', (lambda n: ([ai_page('photo-Sonoma.jpg').wait_for_timeout(1500)], fake_ollama['asked'] == n)[1])(fake_ollama['asked'])); pg.close()
+
+        fake_ollama.update(fail=True)
+        pg = ai_page('ai4.png')
+        check('ai: a failed call leaves it to the checks', ai_dark(pg)); pg.close()
+        fake_ollama.update(fail=False, answer='no')
+
+        ai_settings('off')
+        n = fake_ollama['asked']
+        pg = ai_page('ai5.png')
+        check('ai: off, the checks decide', ai_dark(pg))
+        pg2 = ai_page('ai2.png')
+        check('ai: off ignores saved answers', ai_dark(pg2))
+        check('ai: off asks nothing', fake_ollama['asked'] == n); pg.close(); pg2.close()
+
+        # Chrome's built-in model
+        fake_ollama.update(up=False)
+        fake_ollama.update(nano='no')
+        ai_settings('auto')
+        pg = ai_page('ai6.png')
+        check('ai: Chrome engine vetoes when Ollama is away', not ai_dark(pg))
+        check('ai: Chrome engine got the image', fake_ollama.get('nano_got_image') is True); pg.close()
+        fake_ollama.update(nano=None)
+
+        # Upload: a no leaves the file as it is
+        fake_ollama.update(up=True, answer='no')
+        ai_settings('auto')
+        up = ctx.new_page(); up.goto(base + '/index.html')
+        up.evaluate("""() => { window.got = [];
+          const i = document.createElement('input'); i.type = 'file'; i.id = 'up'; document.body.append(i);
+          i.addEventListener('change', async () => { const f = i.files[0]; const c = new OffscreenCanvas(1,1).getContext('2d'); c.drawImage(await createImageBitmap(f),0,0,1,1,0,0,1,1); window.got.push([...c.getImageData(0,0,1,1).data]); }); }""")
+        n = fake_ollama['asked']
+        up.locator('#up').set_input_files(f'{site}/ai7.png')
+        until(lambda: up.evaluate('window.got.length'), 15000)
+        check('ai: upload left bright on a no', min(up.evaluate('window.got[0]')[:3]) > 150 and fake_ollama['asked'] == n + 1, up.evaluate('window.got'))
+        fake_ollama.update(answer='yes')
+        up.evaluate('window.got = []')
+        up.locator('#up').set_input_files(f'{site}/ai8.png')
+        until(lambda: up.evaluate('window.got.length'), 15000)
+        check('ai: upload darkened on a yes', max(up.evaluate('window.got[0]')[:3]) < 100, up.evaluate('window.got'))
+        up.close()
+
+        # Videos: a frame of a larger file goes to the model
+        fake_ollama.update(up=True, answer='no', delay=0, fail=False)
+        sw.evaluate("chrome.storage.local.set({settings:{" + ALWAYS + ", videos:true, aiEngine:'auto'}}).then(() => { aiPickedAt = 0; })")
+        vp = ctx.new_page(); vp.goto(base + '/index.html')
+        def ai_player(id, clip):
+            vp.evaluate("""([id, clip, media]) => {
+              const p = document.createElement('shreddit-player'); p.id = id; p.style.cssText = 'display:block;width:300px;height:170px';
+              p.setAttribute('preview', `${media}/${clip}`);
+              p.setAttribute('packaged-media-json', JSON.stringify({playbackMp4s: {permutations: [{source: {url: `${media}/${clip}`, dimensions: {width: 480, height: 270}, bitrateBps: 1}}]}}));
+              p.attachShadow({mode: 'open'}).append(document.createElement('video'));
+              document.body.prepend(p);
+            }""", [id, clip, media])
+        def ai_video_filter(id): return vp.evaluate("id => document.getElementById(id).shadowRoot.querySelector('video').style.filter", id)
+        n = fake_ollama['asked']
+        ai_player('no', 'vid-ui.webm')
+        until(lambda: fake_ollama['asked'] > n and not vp.evaluate("document.getElementById('no').hasAttribute('data-applying-dark')"), 15000)
+        vp.wait_for_timeout(500)
+        check('ai: a video stays as it is on a no', 'invert' not in ai_video_filter('no') and fake_ollama['images'] > 0)
+        fake_ollama.update(answer='yes')
+        ai_player('yes', 'vid-ui2.webm')
+        check('ai: a video darkens on a yes', lambda: 'invert' in ai_video_filter('yes'))
+        n = fake_ollama['asked']
+        vp.reload(); ai_player('no', 'vid-ui.webm')
+        until(lambda: not vp.evaluate("document.getElementById('no').hasAttribute('data-applying-dark')"), 15000)
+        vp.wait_for_timeout(500)
+        check('ai: a saved video answer stays, with no new call', 'invert' not in ai_video_filter('no') and fake_ollama['asked'] == n)
+        sw.evaluate("chrome.storage.local.set({settings:{" + ALWAYS + ", videos:true, aiEngine:'off'}})")
+        vp.reload(); ai_player('no', 'vid-ui.webm')
+        check('ai: off, the checks decide a saved video', lambda: 'invert' in ai_video_filter('no'))
+        vp.close()
+        ai_settings('auto')
+
+        # Popup status line
+        extid = sw.url.split('/')[2]
+        pop = ctx.new_page(); pop.set_viewport_size({'width': 300, 'height': 560}); pop.emulate_media(color_scheme='dark')
+        pop.goto(f'chrome-extension://{extid}/popup/popup.html')
+        check('ai popup: names the ready model', lambda: 'seer' in pop.locator('#aiStatus').inner_text())
+        pop.screenshot(path=f'{work}/popup-ai.png')
+        fake_ollama.update(up=False)
+        pop.reload()
+        check('ai popup: shows the command to start Ollama', lambda: 'OLLAMA_ORIGINS' in pop.locator('#aiCommand').inner_text())
+        pop.screenshot(path=f'{work}/popup-ai-off.png')
+        pop.select_option('#aiEngine', 'off')
+        check('ai popup: engine saves', lambda: sw.evaluate("chrome.storage.local.get('settings')")['settings']['aiEngine'] == 'off')
+        check('ai popup: changing engine forgets answers', lambda: 'aiAnswers' not in sw.evaluate("chrome.storage.local.get('aiAnswers')"))
+        pop.close()
 
     ctx.close()
 shutil.rmtree(f'{work}/profile', ignore_errors=True)

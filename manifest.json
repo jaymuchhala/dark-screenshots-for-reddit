@@ -3,11 +3,12 @@
   "name": "Dark Screenshots for Reddit",
   "version": "0.1.0",
   "description": "Turns bright screenshots dark on Reddit, both the ones you read and the ones you upload.",
-  "permissions": ["storage", "contextMenus"],
+  "permissions": ["storage", "contextMenus", "offscreen"],
   "host_permissions": [
     "https://i.redd.it/*",
     "https://preview.redd.it/*",
-    "https://external-preview.redd.it/*"
+    "https://external-preview.redd.it/*",
+    "http://localhost:11434/*"
   ],
   "background": { "service_worker": "background.js" },
   "content_scripts": [

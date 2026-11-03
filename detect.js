@@ -58,6 +58,7 @@ const VIDEO_PART_SHARE = 0.1;
 const VIDEO_PART_HITS = 3;
 const VIDEO_PART_SIZE = 480;
 const VIDEO_TIMEOUT_MS = 15000;
+const AI_IMAGE_SIZE = 768;
 
 // Page only: the worker has no video element. Samples frames across the whole video,
 // because a poster or a single frame can be a white title card on real-life footage.
@@ -437,6 +438,51 @@ function maskCanvas(on, w, h) {
   on.forEach((value, i) => { pixels.data[i * 4 + 3] = value ? 255 : 0; });
   ctx.putImageData(pixels, 0, 0);
   return canvas;
+}
+
+// The size of copy the AI check looks at.
+async function aiImage(blob) {
+  const bitmap = await createImageBitmap(blob);
+  const scale = Math.min(1, AI_IMAGE_SIZE / Math.max(bitmap.width, bitmap.height));
+  const canvas = new OffscreenCanvas(Math.max(1, Math.round(bitmap.width * scale)), Math.max(1, Math.round(bitmap.height * scale)));
+  canvas.getContext('2d').drawImage(bitmap, 0, 0, canvas.width, canvas.height);
+  bitmap.close();
+  return dataUrl(await canvas.convertToBlob({ type: 'image/jpeg', quality: 0.85 }));
+}
+
+// A frame from the middle of a video, for the AI check. Null if the file can't be read.
+async function aiVideoFrame(url) {
+  const video = document.createElement('video');
+  video.crossOrigin = 'anonymous';
+  video.muted = true;
+  video.preload = 'auto';
+  const reached = (event) => new Promise((resolve, reject) => {
+    video.addEventListener(event, resolve, { once: true });
+    video.addEventListener('error', reject, { once: true });
+  });
+  let timer;
+  try {
+    return await Promise.race([
+      (async () => {
+        const ready = reached('loadedmetadata');
+        video.src = url;
+        await ready;
+        const seeked = reached('seeked');
+        video.currentTime = video.duration / 2;
+        await seeked;
+        const canvas = new OffscreenCanvas(video.videoWidth, video.videoHeight);
+        canvas.getContext('2d').drawImage(video, 0, 0);
+        return aiImage(await canvas.convertToBlob());
+      })(),
+      new Promise((resolve) => { timer = setTimeout(resolve, VIDEO_TIMEOUT_MS, null); }),
+    ]);
+  } catch {
+    return null;
+  } finally {
+    clearTimeout(timer);
+    video.removeAttribute('src');
+    video.load();
+  }
 }
 
 function dataUrl(blob) {

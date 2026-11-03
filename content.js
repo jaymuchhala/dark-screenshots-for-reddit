@@ -9,6 +9,8 @@
   const MAX_VIDEO_CHECKS = 2;
   const PLAYER_TRIES = 100, PLAYER_RETRY_MS = 100;
   const VIDEO_REVEAL_AFTER_MS = 6000;
+  const AI_HOLD_MS = 45000;
+  const AI_UPLOAD_WAIT_MS = 30000;
   const PARTS = 'parts';
   const PARTS_CHECK_MS = 100;
   const PARTS_MIN_LOOK_MS = 66;
@@ -26,6 +28,7 @@
   // ---------- Reader: darken screenshots already on the page ----------
 
   const verdicts = new Map();   // image key -> pixel stats or null, or a promise while checking
+  const asking = new Map();     // image key -> when to stop holding it for the AI check
   const tracked = new Map();    // img -> { hidden, darkened, filter, held }
   const players = new Map();    // video player -> { hidden, held, timer, expired }
   const partVideos = new Map(); // video darkened in parts -> { ready, stop }
@@ -387,7 +390,7 @@
     if (key in overrides) {
       setHidden(img, state, false);
       const known = verdicts.get(key);
-      setDarkened(img, state, overrides[key], known === PARTS ? PARTS : known?.partial || null);
+      setDarkened(img, state, overrides[key], known === PARTS ? PARTS : known?.partial || known?.vetoedPartial || null);
       return true;
     }
     if (!readerActive(img)) {
@@ -446,18 +449,60 @@
     const key = imageKey(url);
     if (verdicts.has(key)) return verdicts.get(key);
     const check = img.localName !== 'img'
-      ? withVideoSlot(() => checkVideo(url, largerUrl(playerOf(img))))
-      : chrome.runtime.sendMessage({ type: 'check-image', url: smallestUrl(img, url), fullUrl: largestUrl(img, url) });
+      ? videoVerdict(key, url, img)
+      : chrome.runtime.sendMessage({ type: 'check-image', key, url: smallestUrl(img, url), fullUrl: largestUrl(img, url) })
+        .then((stats) => stats?.askAi && !(key in overrides) ? askAboutImage(key, stats, largestUrl(img, url)) : stats);
     const pending = check
       .catch(() => null)
       .then((result) => {
         verdicts.set(key, result || null);
-        if (img.localName !== 'img' && result !== null) saveVideoVerdict(key, result);
         for (const other of tracked.keys()) render(other);
         for (const player of players.keys()) updatePlayer(player);
       });
     verdicts.set(key, pending);
     return pending;
+  }
+
+  // The AI check has the last word on what the pixel checks would darken. The image stays
+  // held meanwhile, unless the queue is very long. No answer leaves the verdict as it is.
+  async function askAi(key, message) {
+    asking.set(key, Date.now() + AI_HOLD_MS);
+    try {
+      return await chrome.runtime.sendMessage({ type: 'ask-ai', ...message });
+    } catch {
+      return null;
+    } finally {
+      asking.delete(key);
+    }
+  }
+
+  async function askAboutImage(key, stats, url) {
+    if (await askAi(key, { key, url }) !== false) return stats;
+    return { ...stats, photo: 1, partial: null, vetoedPartial: stats.partial };
+  }
+
+  // What's saved is the pixel checks' verdict, so the AI check can change its mind on it later.
+  async function videoVerdict(key, url, player) {
+    const pixels = key in savedVideos ? savedVideos[key] : await withVideoSlot(() => checkVideo(url, largerUrl(playerOf(player))));
+    if (pixels !== null && !(key in savedVideos)) saveVideoVerdict(key, pixels);
+    return pixels === true ? askAboutVideo(key, player) : pixels;
+  }
+
+  async function askAboutVideo(key, player) {
+    const known = await chrome.runtime.sendMessage({ type: 'ai-known', key }).catch(() => null);
+    if (known !== 'ask') return known !== false;
+    const url = largerUrl(playerOf(player));
+    const image = url && await aiVideoFrame(url);
+    if (!image) return true;
+    return await askAi(key, { key, image }) !== false;
+  }
+
+  // Reveals after a while, or once the AI check is done with the image.
+  function revealLater(url, ms, reveal) {
+    setTimeout(() => {
+      if (url && asking.get(imageKey(url)) > Date.now()) revealLater(url, 500, reveal);
+      else reveal();
+    }, ms);
   }
 
   function saveVideoVerdict(key, verdict) {
@@ -473,10 +518,13 @@
       const held = players.get(img);
       if (held) {
         if (!held.hidden) continue;
-        held.timer ??= setTimeout(() => {
-          held.expired = true;
-          updatePlayer(img);
-        }, VIDEO_REVEAL_AFTER_MS);
+        if (!held.timer) {
+          held.timer = true;
+          revealLater(playerUrl(img), VIDEO_REVEAL_AFTER_MS, () => {
+            held.expired = true;
+            updatePlayer(img);
+          });
+        }
         if (readerActive(img)) checkVerdict(img, playerUrl(img));
         continue;
       }
@@ -492,7 +540,7 @@
         if (url && img.localName === 'img' && overrides[imageKey(url)] && chrome.runtime?.id) checkVerdict(img, url);
         continue;
       }
-      setTimeout(() => setHidden(img, state, false), img.localName === 'video' ? VIDEO_REVEAL_AFTER_MS : REVEAL_AFTER_MS);
+      revealLater(url, img.localName === 'video' ? VIDEO_REVEAL_AFTER_MS : REVEAL_AFTER_MS, () => setHidden(img, state, false));
       checkVerdict(img, url);
     }
   }, { rootMargin: '600px' });
@@ -645,6 +693,14 @@
     setTimeout(() => host.remove(), 2500);
   }
 
+  // The upload can't wait as long as an image on the page can.
+  async function isAiVeto(file) {
+    if (settings.aiEngine === 'off') return false;
+    const ask = chrome.runtime.sendMessage({ type: 'ask-ai', image: await aiImage(file) });
+    const late = new Promise((resolve) => setTimeout(resolve, AI_UPLOAD_WAIT_MS, null));
+    return await Promise.race([ask, late]) === false;
+  }
+
   // Returns the files to hand to the page, dark where needed.
   async function convertFiles(files) {
     let changed = 0;
@@ -654,6 +710,7 @@
       try {
         const stats = await analyzeBlob(file);
         if (!isLightScreenshot(stats, settings.tinted) || (mayBePalePhoto(stats) && await isPalePhoto(file))) return file;
+        if (await isAiVeto(file)) return file;
         const dark = await darkenBlob(file);
         changed++;
         return new File([dark], file.name, { type: dark.type, lastModified: file.lastModified });
@@ -742,7 +799,7 @@
     settings = { ...settings, ...stored.settings };
     overrides = stored.overrides || {};
     savedVideos = stored.videoChecks || {};
-    for (const [key, verdict] of Object.entries(savedVideos)) verdicts.set(key, verdict || null);
+    for (const [key, verdict] of Object.entries(savedVideos)) if (verdict !== true) verdicts.set(key, verdict || null);
     watchRoot(document);
   });
 

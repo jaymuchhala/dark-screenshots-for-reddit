@@ -39,3 +39,12 @@ p { margin: 12px 0 0; padding-top: 10px; border-top: 1px solid var(--line); colo
 .minor .switch::after { width: 12px; height: 12px; }
 .minor .switch:checked::after { transform: translateX(10px); }
 @media (prefers-reduced-motion: reduce) { .switch, .switch::after { transition: none; } }
+.ai-row { padding-bottom: 2px; }
+select { flex: none; max-width: 150px; padding: 2px 4px; color: var(--text); background: var(--bg); border: 1px solid var(--line); border-radius: 5px; font: inherit; cursor: pointer; }
+select:focus-visible { outline: 2px solid var(--accent); outline-offset: 2px; }
+.ai-status { margin-top: 2px; }
+.ai-fix { display: flex; align-items: center; gap: 8px; margin-top: 6px; }
+.ai-fix code { flex: 1; min-width: 0; padding: 4px 6px; border: 1px solid var(--line); border-radius: 5px; font-size: 11px; overflow-wrap: anywhere; }
+.text-btn { flex: none; height: 26px; padding: 0 10px; color: var(--accent); background: transparent; border: 1px solid var(--accent); border-radius: 5px; font: inherit; font-size: 12px; cursor: pointer; transition: background-color 0.15s, border-color 0.15s, box-shadow 0.15s; }
+.text-btn:hover, .text-btn:focus-visible { border-color: transparent; background-color: color-mix(in srgb, var(--accent) 16%, transparent); box-shadow: 0 0 10px 3px color-mix(in srgb, var(--accent) 16%, transparent); }
+@media (prefers-reduced-motion: reduce) { .text-btn { transition: none; } }
