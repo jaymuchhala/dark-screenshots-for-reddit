@@ -260,7 +260,10 @@ with sync_playwright() as p:
       for (const [k, v] of Object.entries(attrs)) p.setAttribute(k, v);
       document.getElementById('f').append(p);
       const fill = () => { const s = p.attachShadow({mode:'open'}); const v = document.createElement('video'); v.style.cssText='width:100%;height:100%;object-fit:contain;background:#000';
-        const lazy = document.createElement('shreddit-preview-video-lazy'); const h = document.createElement('video'); h.className = 'scrub'; h.src = attrs.preview || ''; h.style.cssText = 'width:100px;height:60px'; lazy.attachShadow({mode:'open'}).append(h); s.append(v, lazy); };
+        const ui = document.createElement('shreddit-media-ui'), bar = document.createElement('shreddit-progress-bar'), lazy = document.createElement('shreddit-preview-video-lazy');
+        const h = document.createElement('video'); h.className = 'scrub'; h.src = attrs.preview || ''; h.style.cssText = 'width:100px;height:60px;background:#000';
+        s.append(v, ui); ui.attachShadow({mode:'open'}).append(bar); bar.attachShadow({mode:'open'}).append(lazy);
+        setTimeout(() => lazy.attachShadow({mode:'open'}).append(h), 800); };
       late ? setTimeout(fill, 1200) : fill();
     }"""
     def add(id, attrs, late=False): vid.evaluate(ADD, [id, attrs, late])
@@ -296,7 +299,12 @@ with sync_playwright() as p:
     for id in ('photo', 'mixed', 'nocors', 'dead', 'nopreview'):
         check(f'video {id}: left alone', not vfilter(id), vfilter(id))
     check('no video stuck hidden', vid.evaluate("[...document.querySelectorAll('shreddit-player')].every(p => [...p.shadowRoot.querySelectorAll('video')].every(v => v.style.visibility !== 'hidden'))"))
-    check('scrubber thumbnail left alone', vid.evaluate("[...document.querySelectorAll('shreddit-player')].every(p => !p.shadowRoot.querySelector('shreddit-preview-video-lazy').shadowRoot.querySelector('video').style.filter)"))
+    vid.wait_for_timeout(1000)
+    def scrub(id, prop): return vid.evaluate("([id, prop]) => document.getElementById(id).shadowRoot.querySelector('shreddit-media-ui').shadowRoot.querySelector('shreddit-progress-bar').shadowRoot.querySelector('shreddit-preview-video-lazy').shadowRoot.querySelector('video').style[prop]", [id, prop])
+    for id in ('ui', 'phone', 'intro', 'photo', 'mixed', 'nocors', 'dead', 'nopreview'):
+        check(f'scrubber thumbnail {id}: follows its player', ('invert' in scrub(id, 'filter')) == ('invert' in (vfilter(id) or '')), scrub(id, 'filter'))
+        check(f'scrubber thumbnail {id}: not stuck hidden', scrub(id, 'visibility') != 'hidden')
+    check('scrubber thumbnail: bars stay dark', scrub('ui', 'backgroundColor') == 'rgb(255, 255, 255)', scrub('ui', 'backgroundColor'))
     vid.screenshot(path=f'{work}/videos.png', full_page=True)
     # The bars beside a tall video stay dark, darkened or not.
     def bar(id):
@@ -319,6 +327,7 @@ with sync_playwright() as p:
         vid.wait_for_timeout(300)
     toggle()
     check('video override turns it off', not vfilter('ui'))
+    check('video override reaches the scrubber thumbnail', not scrub('ui', 'filter'))
     check('video override restores the background', vid.evaluate("document.getElementById('ui').shadowRoot.querySelector('video').style.backgroundColor") == 'rgb(0, 0, 0)')
     toggle()
     check('video override turns it on', 'invert' in vfilter('ui'))

@@ -23,15 +23,20 @@
     (settings.readerMode === 'always' || systemDark.matches);
 
   // Reddit's player keeps a tiny copy of the video in `preview`, and any page can read
-  // its pixels. GIF posts have no preview, but their own file is readable. Other videos
-  // in the player, such as the scrubber's thumbnail, aren't darkened.
+  // its pixels. GIF posts have no preview, but their own file is readable. The scrubber's
+  // thumbnail is a few shadow roots further in, and shares the verdict of its player.
   function videoUrl(video) {
-    const player = video.getRootNode().host;
-    if (!player || !isPlayer(player)) return null;
+    let player = video.getRootNode().host;
+    while (player && !isPlayer(player)) player = player.getRootNode().host;
+    if (!player) return null;
     return player.getAttribute('preview') || (player.hasAttribute('gif') && player.getAttribute('src')) || null;
   }
 
   const isPlayer = (el) => el.localName === 'shreddit-player' || el.localName === 'shreddit-player-2';
+
+  // The elements between the player and the scrubber's thumbnail.
+  const PLAYER_PARTS = new Set(['shreddit-media-ui', 'shreddit-progress-bar', 'shreddit-preview-video-lazy']);
+  const loadsLate = (el) => isPlayer(el) || PLAYER_PARTS.has(el.localName);
 
   function imageUrl(img) {
     if (img.localName === 'video') return videoUrl(img);
@@ -59,6 +64,16 @@
     return fallback;
   }
 
+  // The largest size, for an image that gets darkened in parts.
+  function largestUrl(img, fallback) {
+    const last = (img.getAttribute('srcset') || '').split(',').pop().trim().split(/\s+/)[0];
+    try {
+      const url = new URL(last, location.href);
+      if (last && IMAGE_HOSTS.has(url.hostname)) return url.href;
+    } catch {}
+    return fallback;
+  }
+
   function setHidden(img, state, hidden) {
     if (state.hidden === hidden) return;
     state.hidden = hidden;
@@ -71,10 +86,20 @@
     }
   }
 
-  function setDarkened(img, state, dark) {
-    if (state.darkened === dark) return;
+  // `picture` is a partly dark copy of the image, shown in place of the original. CSS
+  // `content` leaves the element, its sizing and any filter of the site's as they are.
+  function setDarkened(img, state, dark, picture = null) {
+    if (state.darkened === dark && state.picture === picture) return;
+    if (state.darkened) {
+      img.style.removeProperty('content');
+      img.style.removeProperty('filter');
+      if (state.filter) img.style.setProperty('filter', state.filter);
+    }
     state.darkened = dark;
-    if (dark) {
+    state.picture = picture;
+    if (dark && picture) {
+      img.style.setProperty('content', `url("${picture}")`, 'important');
+    } else if (dark) {
       state.filter = img.style.getPropertyValue('filter');
       // Keep any filter the site has, such as the blur on Reddit's post backdrop.
       const current = getComputedStyle(img).filter;
@@ -108,7 +133,7 @@
     const key = imageKey(url);
     if (key in overrides) {
       setHidden(img, state, false);
-      setDarkened(img, state, overrides[key]);
+      setDarkened(img, state, overrides[key], verdicts.get(key)?.partial || null);
       return true;
     }
     if (!readerActive(img)) {
@@ -119,7 +144,8 @@
     const stats = verdicts.get(key);
     if (stats === null || (stats && !(stats instanceof Promise))) {
       // A video's verdict is already true or null. An image's depends on the settings.
-      setDarkened(img, state, stats === true || (!!stats && isLightScreenshot(stats, settings.tinted)));
+      const picture = usesPartial(stats, settings.tinted) ? stats.partial : null;
+      setDarkened(img, state, stats === true || !!picture || (!!stats && isLightScreenshot(stats, settings.tinted)), picture);
       setHidden(img, state, false);
       return true;
     }
@@ -145,7 +171,7 @@
     if (verdicts.has(key)) return verdicts.get(key);
     const check = img.localName === 'video'
       ? withVideoSlot(() => isLightVideo(url))
-      : chrome.runtime.sendMessage({ type: 'check-image', url: smallestUrl(img, url) });
+      : chrome.runtime.sendMessage({ type: 'check-image', url: smallestUrl(img, url), fullUrl: largestUrl(img, url) });
     const pending = check
       .catch(() => null)
       .then((result) => {
@@ -165,8 +191,12 @@
         setHidden(img, state, false);
         continue;
       }
-      if (render(img)) continue;
       const url = imageUrl(img);
+      if (render(img)) {
+        // Turned on by hand, an image still needs its verdict to know if it's darkened in parts.
+        if (url && img.localName === 'img' && overrides[imageKey(url)] && chrome.runtime?.id) checkVerdict(img, url);
+        continue;
+      }
       setTimeout(() => setHidden(img, state, false), REVEAL_AFTER_MS);
       checkVerdict(img, url);
     }
@@ -196,22 +226,22 @@
 
   const isMedia = (el) => el.localName === 'img' || el.localName === 'video';
 
-  // The player's script loads late, so its shadow root may not exist yet.
-  function watchPlayer(player, tries = PLAYER_TRIES) {
-    if (player.shadowRoot) watchRoot(player.shadowRoot);
-    else if (tries && player.isConnected) setTimeout(() => watchPlayer(player, tries - 1), PLAYER_RETRY_MS);
+  // The player's scripts load late, so a shadow root may not exist yet.
+  function watchLate(el, tries = PLAYER_TRIES) {
+    if (el.shadowRoot) watchRoot(el.shadowRoot);
+    else if (tries && el.isConnected) setTimeout(() => watchLate(el, tries - 1), PLAYER_RETRY_MS);
   }
 
   function scan(node) {
     if (node.nodeType !== Node.ELEMENT_NODE && node.nodeType !== Node.DOCUMENT_FRAGMENT_NODE && node.nodeType !== Node.DOCUMENT_NODE) return;
     if (node.nodeType === Node.ELEMENT_NODE && isMedia(node)) track(node);
-    if (node.nodeType === Node.ELEMENT_NODE && isPlayer(node)) watchPlayer(node);
+    if (node.nodeType === Node.ELEMENT_NODE && loadsLate(node)) watchLate(node);
     if (node.shadowRoot) watchRoot(node.shadowRoot);
     const walker = document.createTreeWalker(node, NodeFilter.SHOW_ELEMENT);
     while (walker.nextNode()) {
       const el = walker.currentNode;
       if (isMedia(el)) track(el);
-      else if (isPlayer(el)) watchPlayer(el);
+      else if (loadsLate(el)) watchLate(el);
       else if (el.shadowRoot) watchRoot(el.shadowRoot);
     }
   }
