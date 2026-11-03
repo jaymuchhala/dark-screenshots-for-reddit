@@ -50,6 +50,8 @@ MAKE = """async () => {
     mk('neg-product.jpg', 800, 800, (x,w,h)=>{ x.fillStyle='#fff'; x.fillRect(0,0,w,h); noise(x,180,150,440,500,[170,60,50]); }, 'image/jpeg'),
     mk('neg-paper-photo.jpg', 800, 600, (x,w,h)=>{ noise(x,0,0,w,h,[205,205,200]); }, 'image/jpeg'),
     mk('neg-dark-ui.png', 900, 500, (x,w,h)=>{ x.fillStyle='#121212'; x.fillRect(0,0,w,h); x.fillStyle='#eee'; x.font='24px sans-serif'; for(let i=0;i<8;i++) x.fillText('Installs & uninstalls  489',40,60+i*50); }),
+    mk('pos-cream-chart.png', 1100, 750, (x,w,h)=>{ x.fillStyle='#feecdc'; x.fillRect(0,0,w,h); x.fillStyle='#f9dccb'; x.fillRect(880,0,220,h); x.strokeStyle='#887'; for(let i=1;i<4;i++){ x.beginPath(); x.moveTo(0,i*170); x.lineTo(w,i*170); x.stroke(); } const cs=['#0a2a8c','#1a7fd6','#d10f0f','#7fae1e']; for(let i=0;i<25;i++){ let y=680; for(const c of cs){ const b=8+((i*7+c.charCodeAt(2))%30)*(1+i/10); x.fillStyle=c; x.fillRect(30+i*42,y-b,30,b); y-=b; } } }),
+    mk('neg-red-heatmap.png', 1100, 600, (x,w,h)=>{ x.fillStyle='#000'; x.fillRect(0,0,w,h); for(let i=0;i<30;i++) for(let j=0;j<16;j++){ x.fillStyle='#7f1820'; x.fillRect(i*37+1,j*37+1,35,35); x.fillStyle='#eee'; x.fillRect(i*37+12,j*37+12,12,12); } }),
     mk('pos-text-ui.png', 900, 500, (x,w,h)=>{ x.fillStyle='#fff'; x.fillRect(0,0,w,h); x.fillStyle='#222'; x.font='18px sans-serif'; for(let i=0;i<20;i++) x.fillText('Lorem ipsum dolor sit amet, consectetur adipiscing elit, sed do eiusmod tempor',20,26+i*24); }),
   ]);
 }"""
@@ -124,6 +126,39 @@ with sync_playwright() as p:
     sw.evaluate("async () => { for (const t of await chrome.tabs.query({})) chrome.tabs.sendMessage(t.id, {type:'toggle-image'}).catch(()=>{}); }")
     page.wait_for_timeout(300)
     check('override turns it on', 'invert' in page.locator('img[alt="shot1.png"]').evaluate(FILTERED))
+
+    # Right-click with a full-card link over the image, as on Reddit's feed
+    page.evaluate("""() => { const d=document.createElement('div'); d.id='card'; d.style.cssText='position:relative;width:300px;height:200px';
+       const h=document.createElement('x-media'); h.style.cssText='display:block;width:100%;height:100%'; const s=h.attachShadow({mode:'open'});
+       const i=new Image(); i.id='covered'; i.src='/shot4.png?card'; i.style.cssText='width:100%;height:100%;object-fit:contain'; s.append(i);
+       const a=document.createElement('a'); a.href='#'; a.style.cssText='position:absolute;inset:0'; d.append(h,a); document.body.prepend(d); }""")
+    page.wait_for_timeout(1000)
+    covered = "document.querySelector('x-media').shadowRoot.querySelector('img').style.filter"
+    sw.evaluate("""() => { self.menuCalls = []; const u = chrome.contextMenus.update; chrome.contextMenus.update = (id, p) => { self.menuCalls.push(p.visible); return u.call(chrome.contextMenus, id, p); }; }""")
+    page.evaluate("scrollTo(0, 0)")
+    box = page.locator('#card').bounding_box()
+    page.mouse.move(1290, 880); page.wait_for_timeout(200)
+    page.mouse.move(1285, 885); page.wait_for_timeout(300)
+    page.mouse.move(box['x'] + 150, box['y'] + 100); page.wait_for_timeout(300)
+    page.mouse.move(box['x'] + 152, box['y'] + 102); page.wait_for_timeout(300)
+    check('menu shown over a covered image', sw.evaluate("self.menuCalls.at(-1)") is True, sw.evaluate("self.menuCalls"))
+    was = page.evaluate(covered)
+    check('covered image starts dark', 'invert' in was, was)
+    page.mouse.click(box['x'] + 150, box['y'] + 100, button='right')
+    page.keyboard.press('Escape')
+    sw.evaluate("async () => { for (const t of await chrome.tabs.query({})) chrome.tabs.sendMessage(t.id, {type:'toggle-image'}).catch(()=>{}); }")
+    page.wait_for_timeout(300)
+    check('override works under a link', not page.evaluate(covered))
+    sw.evaluate("chrome.storage.local.remove('overrides')"); page.wait_for_timeout(200)
+    page.mouse.move(1290, 880); page.wait_for_timeout(200)
+    page.mouse.move(1285, 885); page.wait_for_timeout(300)
+    check('menu hidden off images', sw.evaluate("self.menuCalls.at(-1)") is False, sw.evaluate("self.menuCalls"))
+    page.mouse.click(1285, 885, button='right')
+    page.keyboard.press('Escape')
+    before = page.locator('img[alt="shot2.png"]').evaluate(FILTERED)
+    sw.evaluate("async () => { for (const t of await chrome.tabs.query({})) chrome.tabs.sendMessage(t.id, {type:'toggle-image'}).catch(()=>{}); }")
+    page.wait_for_timeout(200)
+    check('toggle off an image does nothing', page.locator('img[alt="shot2.png"]').evaluate(FILTERED) == before)
 
     # Uploader: a Reddit-style input in an open shadow root, with listeners that record what the page receives.
     upload = ctx.new_page()

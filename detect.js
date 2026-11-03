@@ -7,8 +7,8 @@ const DARK_FILTER = 'invert(0.93) hue-rotate(180deg)';
 const SAMPLE_SIZE = 320;
 
 // Decides from pixels whether an image is a light-theme screenshot. Screenshots are
-// mostly flat, pale, nearly colorless areas. Photos have texture everywhere, and
-// already dark images aren't pale.
+// mostly flat, pale areas, white or lightly tinted like a cream chart background.
+// Photos have texture everywhere, and already dark images aren't pale.
 function measure(data, width, height) {
   let light = 0, flat = 0, colorful = 0;
   const total = width * height;
@@ -19,7 +19,7 @@ function measure(data, width, height) {
       const r = data[i], g = data[i + 1], b = data[i + 2];
       const chroma = Math.max(r, g, b) - Math.min(r, g, b);
       const luma = 0.299 * r + 0.587 * g + 0.114 * b;
-      if (luma >= 215 && chroma <= 24) light++;
+      if (luma >= 215 && chroma <= 48) light++;
       if (chroma > 48) colorful++;
       const right = x + 1 < width ? i + 4 : i;
       const down = y + 1 < height ? i + width * 4 : i;
@@ -32,7 +32,7 @@ function measure(data, width, height) {
 }
 
 function isLightScreenshot({ light, flat, colorful }) {
-  return light >= 0.5 && flat >= 0.55 && colorful <= 0.15;
+  return light >= 0.5 && flat >= 0.55 && colorful <= 0.25;
 }
 
 async function analyzeBlob(blob) {

@@ -2,6 +2,7 @@ importScripts('detect.js');
 
 const IMAGE_HOSTS = new Set(['i.redd.it', 'preview.redd.it', 'external-preview.redd.it']);
 const MAX_FETCHES = 4;
+const MENU_ID = 'toggle-dark';
 
 let running = 0;
 const waiting = [];
@@ -45,22 +46,28 @@ checkBuild();
 chrome.runtime.onMessage.addListener((msg, sender, reply) => {
   if (sender.id !== chrome.runtime.id) return;
   if (msg.type === 'check-build') checkBuild();
+  if (msg.type === 'menu-visible') chrome.contextMenus.update(MENU_ID, { visible: msg.visible }).catch(() => {});
   if (msg.type !== 'check-image') return;
   checkImage(msg.url).then(reply, () => reply(false));
   return true;
 });
 
+// Reddit lays links over its post images, and Chrome then reports a link or the page
+// instead of an image, so the 'image' context alone would miss them. The content script
+// hides the item while the pointer isn't over an image.
 chrome.runtime.onInstalled.addListener(() => {
-  chrome.contextMenus.create({
-    id: 'toggle-dark',
-    title: 'Switch dark mode for this image',
-    contexts: ['image'],
-    documentUrlPatterns: ['https://*.reddit.com/*', 'https://reddit.com/*'],
+  chrome.contextMenus.removeAll(() => {
+    chrome.contextMenus.create({
+      id: MENU_ID,
+      title: 'Switch dark mode for this image',
+      contexts: ['page', 'link', 'image'],
+      documentUrlPatterns: ['https://*.reddit.com/*', 'https://reddit.com/*'],
+    });
   });
 });
 
 chrome.contextMenus.onClicked.addListener((info, tab) => {
-  if (info.menuItemId === 'toggle-dark') {
+  if (info.menuItemId === MENU_ID) {
     chrome.tabs.sendMessage(tab.id, { type: 'toggle-image' }, { frameId: info.frameId }).catch(() => {});
   }
 });
