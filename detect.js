@@ -1105,10 +1105,9 @@ function finishRegion(box, data, pale, width, height) {
 }
 
 // Finds light UI pixel by pixel, for a video that's playing: while a window zooms or slides,
-// its edges blur and pairing them up gives pieces with footage in them. Returns rectangles
-// in pixels of the frame, one row band at a time. A dark label or a big picture on the UI
-// stays out of them.
-const LIGHT_HOLE = 0.03;
+// its edges blur and pairing them up gives pieces with footage in them. Returns one byte a
+// pixel, 1 for UI. A dark label or a big picture on the UI stays out of it.
+const LIGHT_HOLE = 0.03, LIGHT_PIECE_MIN = 12;
 function lightMask(data, width, height) {
   const n = width * height;
   const pale = new Uint8Array(n), rest = new Uint8Array(n), queue = new Int32Array(n);
@@ -1133,11 +1132,68 @@ function lightMask(data, width, height) {
     if (end - start < n * REGION_MIN_AREA) return;
     if (looksLikeUi(queue, start, end, data, pale, width, height)) for (let i = start; i < end; i++) keep[queue[i]] = 1;
   });
+  // The cuts leave small straight pieces, like a tab or a strip beside a panel. Right next to UI, they're UI.
+  let near = keep;
+  for (let i = 0; i < 3; i++) near = grown(near, width);
+  eachGroup(solid, width, queue, (start, end) => {
+    if (end - start >= n * REGION_MIN_AREA || end - start < LIGHT_PIECE_MIN) return;
+    let touches = false;
+    for (let i = start; i < end && !touches; i++) touches = !!near[queue[i]];
+    if (!touches) return;
+    const { lefts, rights, tops, bottoms } = groupEnds(queue, start, end, width, height);
+    if ([[lefts, width], [rights, width], [tops, height], [bottoms, height]].every(([ends, size]) => straightShare(ends, size) >= 0.9)) {
+      for (let i = start; i < end; i++) keep[queue[i]] = 1;
+    }
+  });
   softenMask(keep, data, width);
-  return maskRects(keep, width, height);
+  return keep;
+}
+
+// In a video that's darkened as a whole, what the filter would ruin: dark panels, which it
+// would turn white, and color. Text is too thin to count, so it still flips. Whatever sits
+// on a panel, like its own light text, goes with it. Returns one byte a pixel, 1 to keep.
+const KEEP_THICK = 3, KEEP_DARK = 110, KEEP_CHROMA = 70, KEEP_MIN_AREA = 0.002, KEEP_MIN_FILL = 0.6;
+function naturalMask(data, width, height) {
+  const n = width * height, queue = new Int32Array(n);
+  let solid = new Uint8Array(n);
+  for (let i = 0; i < n; i++) {
+    const r = data[i * 4], g = data[i * 4 + 1], b = data[i * 4 + 2], top = Math.max(r, g, b);
+    if (top < KEEP_DARK || top - Math.min(r, g, b) > KEEP_CHROMA) solid[i] = 1;
+  }
+  const before = solid;
+  for (let i = 0; i < KEEP_THICK; i++) solid = shrunk(solid, width);
+  for (let i = 0; i < KEEP_THICK; i++) solid = grown(solid, width);
+  for (let i = 0; i < n; i++) if (!before[i]) solid[i] = 0;
+  const keep = new Uint8Array(n);
+  eachGroup(solid, width, queue, (start, end) => {
+    if (end - start < n * KEEP_MIN_AREA) return;
+    for (let i = start; i < end; i++) keep[queue[i]] = 1;
+  });
+  const holes = new Uint8Array(n);
+  for (let i = 0; i < n; i++) holes[i] = keep[i] ? 0 : 1;
+  eachGroup(holes, width, queue, (start, end) => {
+    if (end - start >= n * LIGHT_HOLE) return;
+    for (let i = start; i < end; i++) keep[queue[i]] = 1;
+  });
+  // Panels and buttons fill their outline. Patches of footage or a photo in a page don't,
+  // and keeping those would leave them spotted.
+  eachGroup(keep.slice(), width, queue, (start, end) => {
+    let left = width, right = 0, top = n, bottom = 0;
+    for (let i = start; i < end; i++) {
+      const c = queue[i], x = c % width, y = (c - x) / width;
+      if (x < left) left = x;
+      if (x > right) right = x;
+      if (y < top) top = y;
+      if (y > bottom) bottom = y;
+    }
+    if ((end - start) / ((right - left + 1) * (bottom - top + 1)) >= KEEP_MIN_FILL) return;
+    for (let i = start; i < end; i++) keep[queue[i]] = 0;
+  });
+  return shrunk(keep, width);
 }
 
 // UI has straight sides, is mostly pale and flat, a color or two, with text or icons on it.
+const BLURRED_PANEL_MIN = 0.04;
 function looksLikeUi(queue, start, end, data, pale, width, height) {
   const { lefts, rights, tops, bottoms } = groupEnds(queue, start, end, width, height);
   let palePixels = 0, flat = 0;
@@ -1153,16 +1209,20 @@ function looksLikeUi(queue, start, end, data, pale, width, height) {
       Math.abs(data[i] - data[down]) + Math.abs(data[i + 1] - data[down + 1]) + Math.abs(data[i + 2] - data[down + 2]) <= 6) flat++;
   }
   const area = end - start, ink = 1 - palePixels / area;
-  if (palePixels / area < 0.6 || flat / palePixels < 0.45) return false;
+  if (palePixels / area < 0.6) return false;
   const top = [...colors.values()].sort((p, q) => q - p).slice(0, 2).reduce((total, count) => total + count, 0) / palePixels;
   const sides = [straightShare(lefts, width), straightShare(rights, width), straightShare(tops, height), straightShare(bottoms, height)];
   if (sides.some((share) => share < 0.7)) return false;
   const box = sides.every((share) => share >= 0.95);
+  // Motion blur takes the flatness out of a bar, but not its outline.
+  if (flat / palePixels < (box ? 0.25 : 0.45)) return false;
   // A stretch of bar with nothing on it, cut off from the rest by a panel's edge.
-  if (ink < 0.01) return box && flat / palePixels >= 0.9 && top >= 0.8;
-  // Motion blur spreads the colors of a bar, but its outline stays a clean box.
-  if (box && top >= 0.15) return true;
-  return top >= 0.2 && (top >= 0.25 || ink < 0.15);
+  if (ink < 0.01) return box && top >= 0.3;
+  // It spreads the colors too. A patch of road cut square by the things in front of it can
+  // pass this, so only for a panel's size.
+  if (box && top >= 0.15 && area >= width * height * BLURRED_PANEL_MIN) return true;
+  // Sky and road make uneven shapes with a spread of colors.
+  return top >= 0.3;
 }
 
 // Where each row and column of a group starts and ends.
@@ -1240,26 +1300,6 @@ function softenMask(mask, data, width) {
       if (near && 0.299 * data[i * 4] + 0.587 * data[i * 4 + 1] + 0.114 * data[i * 4 + 2] >= 128) mask[i] = 1;
     }
   }
-}
-
-// Runs of pixels on each row, with the same runs on the next rows joined into one rectangle.
-function maskRects(mask, width, height) {
-  const rects = [];
-  let open = new Map();
-  for (let y = 0; y < height; y++) {
-    const next = new Map();
-    for (let x = 0; x < width; x++) {
-      if (!mask[y * width + x]) continue;
-      const from = x;
-      while (x + 1 < width && mask[y * width + x + 1]) x++;
-      const key = from * 65536 + x, rect = open.get(key);
-      if (rect) rect.h++;
-      else rects.push(next.set(key, { x: from, y, w: x - from + 1, h: 1 }).get(key));
-      if (rect) next.set(key, rect);
-    }
-    open = next;
-  }
-  return rects;
 }
 
 async function darkenBlob(blob) {

@@ -33,12 +33,13 @@ class Q(http.server.SimpleHTTPRequestHandler):
         self.send_header('Accept-Ranges', 'bytes')
         self.send_header('Content-Length', str(end - start + 1))
         if status == 206: self.send_header('Content-Range', f'bytes {start}-{end}/{len(data)}')
-        self.send_header('Access-Control-Allow-Origin', '*')
+        if 'nocors' not in path: self.send_header('Access-Control-Allow-Origin', '*')
         self.end_headers()
         self.wfile.write(data[start:end + 1])
 srv = http.server.ThreadingHTTPServer(('localhost', 0), Q)
 threading.Thread(target=srv.serve_forever, daemon=True).start()
 base = f'http://localhost:{srv.server_port}'
+other = f'http://127.0.0.1:{srv.server_port}'   # So the player's file is cross-origin, like Reddit's.
 
 # Footage is a moving picture full of color. The UI, drawn as a page, goes over it: a pale
 # toolbar across the top and a popup that moves halfway through.
@@ -109,10 +110,18 @@ with sync_playwright() as p:
       const ui = document.createElement('shreddit-media-ui'); ui.style.cssText = 'position:absolute;inset:0;pointer-events:none';
       s.append(v, ui);
     }"""
-    def add(id, main, preview, larger, w=640, h=360): page.evaluate(ADD, [id, f'{base}/{main}', f'{base}/{preview}', larger and f'{base}/{larger}', w, h])
-    def cover(id): return page.evaluate("id => { const c = document.getElementById(id).shadowRoot.querySelector('[data-dark-parts]'); return c && { path: c.style.clipPath, display: c.style.display, next: c.previousElementSibling.localName, under: c.nextElementSibling.localName } }", id)
+    def add(id, main, preview, larger, w=640, h=360): page.evaluate(ADD, [id, f'{other}/{main}', f'{base}/{preview}', larger and f'{base}/{larger}', w, h])
+    def cover(id): return page.evaluate("""id => {
+      const c = document.getElementById(id).shadowRoot.querySelector('[data-dark-overlay]');
+      if (!c) return null;
+      const seen = c.width ? c.getContext('2d').getImageData(0, 0, c.width, c.height).data : [];
+      let shown = 0;
+      for (let i = 3; i < seen.length; i += 4) if (seen[i] > 128) shown++;
+      return { shown: shown / (c.width * c.height || 1), filter: c.style.filter, next: c.previousElementSibling.localName, under: c.nextElementSibling.localName };
+    }""", id)
+    def video(id, expr): return page.evaluate(f"id => {{ const v = document.getElementById(id).shadowRoot.querySelector('video'); return {expr}; }}", id)
     def vfilter(id): return page.evaluate("id => document.getElementById(id).shadowRoot.querySelector('video').style.filter", id)
-    def saved(): return sw.evaluate("chrome.storage.local.get('videoChecks')").get('videoChecks', {})
+    def saved(): return sw.evaluate("chrome.storage.local.get('videoScreens')").get('videoScreens', {})
     def shot(id):
         return base64.b64encode(page.locator(f'#{id}').screenshot()).decode()
     def pixel(id, points):
@@ -136,6 +145,9 @@ with sync_playwright() as p:
     check('recording: video has no filter', not vfilter('rec'), vfilter('rec'))
     c = cover('rec')
     check('recording: cover right after the video, under the controls', c and c['next'] == 'video' and c['under'] == 'shreddit-media-ui', c)
+    check('recording: the canvas is darkened', 'invert' in c['filter'], c)
+    check('recording: no second video', page.evaluate("document.getElementById('rec').shadowRoot.querySelectorAll('video').length") == 1)
+    check('recording: reloaded with CORS', video('rec', 'v.crossOrigin') == 'anonymous')
     check('recording: not left hidden', page.evaluate("getComputedStyle(document.getElementById('rec')).visibility") == 'visible')
     check('footage: no cover, no filter', not cover('plain') and not vfilter('plain'))
     check('footage: not left hidden', page.evaluate("getComputedStyle(document.getElementById('plain')).visibility") == 'visible')
@@ -162,7 +174,10 @@ with sync_playwright() as p:
     # The real file plays along with the real video while it plays.
     page.evaluate("document.getElementById('rec').shadowRoot.querySelector('video').play()")
     page.wait_for_timeout(1500)
-    check('playing: cover keeps a shape', bool(cover('rec')['path']), cover('rec'))
+    check('playing: the canvas shows the UI', 0.02 < cover('rec')['shown'] < 0.6, cover('rec'))
+    before = video('rec', 'v.currentTime')
+    page.wait_for_timeout(500)
+    check('playing: the video moves on', video('rec', 'v.currentTime') != before)
 
     # Right-click override
     def toggle():
@@ -181,11 +196,16 @@ with sync_playwright() as p:
     sw.evaluate("chrome.storage.local.set({settings:{reader:true, readerMode:'always', videos:true, uploader:true}})")
     page.wait_for_timeout(1000)
 
-    # A link that doesn't load leaves the video as it is.
-    add('dead', 'rec.webm', 'rec-96.webm', 'missing.webm')
-    page.wait_for_timeout(1500)
-    check('dead link: not left hidden', page.evaluate("getComputedStyle(document.getElementById('dead')).visibility") == 'visible')
-    check('dead link: no cover, no filter', not cover('dead') and not vfilter('dead'), cover('dead'))
+    # A file that refuses CORS goes back to how it was loaded and keeps playing.
+    shutil.copy(f'{site}/rec.webm', f'{site}/nocors.webm')
+    add('dead', 'nocors.webm', 'rec-96.webm', 'rec.webm')
+    page.wait_for_timeout(2500)
+    check('no CORS: not left hidden', page.evaluate("getComputedStyle(document.getElementById('dead')).visibility") == 'visible')
+    check('no CORS: no cover, no filter', not cover('dead') and not vfilter('dead'), cover('dead'))
+    check('no CORS: crossorigin taken off', video('dead', 'v.crossOrigin') is None)
+    before = video('dead', 'v.currentTime')
+    page.wait_for_timeout(500)
+    check('no CORS: still playing', video('dead', 'v.currentTime') != before, before)
 
     # Reload knows the verdict.
     page.reload(); page.wait_for_timeout(300)
@@ -201,7 +221,6 @@ with sync_playwright() as p:
         for t in (3, 11, 21, 24, 29, 35, 38):
             seek('real', t)
             page.locator('#real').screenshot(path=f'{work}/real-{t}s.png')
-        # Playing, a look at timing: how far the copy is behind and how long a look takes.
         page.evaluate("document.getElementById('real').shadowRoot.querySelector('video').currentTime = 8; document.getElementById('real').shadowRoot.querySelector('video').play()")
         for i in range(8):
             page.wait_for_timeout(500)

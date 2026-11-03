@@ -107,6 +107,9 @@ clip('vid-nocors.webm', UI[:3])
 FACE = f'{work}/shot-face.png'
 subprocess.run(['ffmpeg', '-v', 'error', '-y', '-i', UI[0], '-i', f'{os.path.dirname(os.path.abspath(__file__))}/face.jpg', '-filter_complex', '[0]scale=640:360,setsar=1[a];[1]scale=150:188[b];[a][b]overlay=480:162', '-frames:v', '1', FACE], check=True)
 clip('vid-face.webm', [FACE, FACE, FACE], '640:360')
+CAM = f'{work}/shot-cam.png'
+subprocess.run(['ffmpeg', '-v', 'error', '-y', '-i', UI[0], '-i', f'{os.path.dirname(os.path.abspath(__file__))}/face.jpg', '-filter_complex', '[0]scale=640:360,setsar=1[a];[1]scale=70:88[b];[a][b]overlay=540:252', '-frames:v', '1', CAM], check=True)
+clip('vid-cam.webm', [CAM, CAM, CAM], '640:360')
 
 # Images a screenshot detector must leave alone, plus a dark UI screenshot.
 MAKE = """async () => {
@@ -614,7 +617,9 @@ with sync_playwright() as p:
               const p = document.createElement('shreddit-player'); p.id = id; p.style.cssText = 'display:block;width:300px;height:170px';
               p.setAttribute('preview', `${media}/${clip}`);
               p.setAttribute('packaged-media-json', JSON.stringify({playbackMp4s: {permutations: [{source: {url: `${media}/${clip}`, dimensions: {width: 480, height: 270}}}]}}));
-              p.attachShadow({mode: 'open'}).append(document.createElement('video'));
+              const v = document.createElement('video');
+              v.muted = true; v.loop = true; v.src = `${media}/${clip}`; v.play();
+              p.attachShadow({mode: 'open'}).append(v);
               document.body.prepend(p);
             }""", [id, clip, media])
         def ai_video_filter(id): return vp.evaluate("id => document.getElementById(id).shadowRoot.querySelector('video').style.filter", id)
@@ -631,23 +636,30 @@ with sync_playwright() as p:
         ai_player('yes', 'vid-ui2.webm')
         check('model: a video darkens on a yes', lambda: 'invert' in ai_video_filter('yes'))
         # A person keeps their colors, and a video with nobody in it gets nothing on top
-        ai_player('cam', 'vid-face.webm')
-        SHOWN = """() => {
-          const c = document.getElementById('cam').shadowRoot.querySelector('[data-dark-people]');
+        SHOWN = """([id, x0, y0, x1, y1]) => {
+          const c = document.getElementById(id).shadowRoot.querySelector('[data-dark-overlay]');
           if (!c || !c.width) return null;
           const d = c.getContext('2d').getImageData(0, 0, c.width, c.height).data, sx = c.width / 640, sy = c.height / 360;
           let inside = 0, outside = 0;
           for (let y = 0; y < c.height; y++) for (let x = 0; x < c.width; x++) {
             if (d[(y * c.width + x) * 4 + 3] < 128) continue;
-            if (x >= 470 * sx && y >= 150 * sy) inside++; else outside++;
+            const within = x >= x0 * sx && x < x1 * sx && y >= y0 * sy && y < y1 * sy;
+            if (within) inside++; else outside++;
           }
-          return { inside, outside, total: c.width * c.height };
+          return { inside, outside, area: (x1 - x0) * (y1 - y0) * sx * sy, darkened: !!c.style.filter };
         }"""
-        check('people: a webcam shows in natural colors', lambda: (vp.evaluate(SHOWN) or {}).get('inside', 0) > 0, vp.evaluate(SHOWN))
-        shown = vp.evaluate(SHOWN) or {}
-        check('people: only the person', shown.get('outside', 1) < shown.get('inside', 0) * 0.1, shown)
-        saved = sw.evaluate("chrome.storage.local.get('videoPeople')").get('videoPeople', {})
-        check('people: a scan of a recording with nobody finds nobody', [] in saved.values() and not vp.evaluate("document.getElementById('yes').shadowRoot.querySelector('[data-dark-people]')"), saved)
+        # Small webcam: the frame darkens whole, so the person is what the canvas shows.
+        ai_player('cam', 'vid-cam.webm')
+        area = lambda: vp.evaluate(SHOWN, ['cam', 540, 252, 610, 340]) or {}
+        check('people: a webcam shows in natural colors', lambda: area().get('inside', 0) > area().get('area', 1) * 0.3, area())
+        check('people: only the person', lambda: not area().get('darkened') and area().get('outside', 1) < area().get('inside', 0) * 0.5, area())
+        # Large one: the page is what's darkened, around the person.
+        ai_player('big', 'vid-face.webm')
+        area = lambda: vp.evaluate(SHOWN, ['big', 480, 162, 630, 350]) or {}
+        check('people: a page around a large webcam darkens', lambda: area().get('darkened') and area().get('outside', 0) > 120000, area())
+        check('people: a large webcam stays out of the darkening', area().get('inside', 1) < area().get('area', 0) * 0.1, area())
+        saved = lambda: sw.evaluate("chrome.storage.local.get('videoPeople')").get('videoPeople', {})
+        check('people: a scan of a recording with nobody finds nobody', lambda: [] in saved().values(), saved())
         vp.close()
 
     ctx.close()
