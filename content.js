@@ -176,11 +176,11 @@
   function followLayout(el, state) {
     const name = el.localName === 'img' ? 'background-image' : '--dark-screenshots-waiting';
     if (!(name in holdStyles(el))) return;
-    state.picture = el.style.getPropertyValue(name);
+    state.waiting = el.style.getPropertyValue(name);
     state.layout = new ResizeObserver(() => {
       const picture = waitingPicture(el);
-      if (picture === state.picture) return;
-      state.picture = picture;
+      if (picture === state.waiting) return;
+      state.waiting = picture;
       el.style.setProperty(name, picture, 'important');
     });
     state.layout.observe(el);
