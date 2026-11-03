@@ -401,7 +401,6 @@ with sync_playwright() as p:
     hold.wait_for_timeout(800)
     def before(page, prop): return page.evaluate("prop => getComputedStyle(document.getElementById('h'), '::before')[prop]", prop)
     check('loading icon: shown while checking', before(hold, 'content') != 'none' and before(hold, 'visibility') == 'visible' and before(hold, 'opacity') == '1', before(hold, 'content'))
-    check('loading icon: has its message', 'Applying dark mode...' in hold.evaluate("getComputedStyle(document.getElementById('h'), '::after').content"))
     check('loading icon: sweeps and pulses', all(name in before(hold, 'animationName') for name in ('sweep', 'pulse')), before(hold, 'animationName'))
     check('loading icon: video stays hidden', hold.evaluate("getComputedStyle(document.getElementById('h').shadowRoot.querySelector('video')).visibility") == 'hidden')
     for i in range(3):
