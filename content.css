@@ -16,8 +16,8 @@
 [data-applying-dark]::before {
   content: "";
   z-index: 2;
-  top: 12%;
-  right: 16px;
+  top: 14px;
+  right: 14px;
   width: 16px;
   height: 16px;
   border-radius: 22%;
