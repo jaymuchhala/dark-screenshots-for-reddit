@@ -243,17 +243,21 @@ with sync_playwright() as p:
         shutil.copy(f'{site}/shot3.png', f'{site}/crawl-copy.png')
         shutil.copy(f'{site}/shot3.png', f'{site}/crawl-tiny.png')
         shutil.copy(f'{site}/shot3.png', f'{site}/crawl-small.png')
+        shutil.copy(f'{site}/shot3.png', f'{site}/crawl-clipped.png')
         page.evaluate("""() => { document.body.insertAdjacentHTML('afterbegin', `<div id=icons style="position:relative;height:200px">
           <img id=wait src="/crawl-icon.png" style="width:300px;height:200px;background-color:rgb(1,2,3)">
           <img id=copy class="post-background-image-filter" src="/crawl-copy.png" style="width:300px;height:200px">
           <img id=tiny src="/crawl-tiny.png" style="width:40px;height:40px">
-          <img id=small src="/crawl-small.png" style="width:100px;height:50px"></div>`); window.scrollTo(0, 0); }""")
+          <img id=small src="/crawl-small.png" style="width:100px;height:50px">
+          <div style="position:absolute;top:300px;left:0;width:445px;height:476px;display:flex;justify-content:center;align-items:center;overflow:hidden"><img id=clipped src="/crawl-clipped.png" style="position:relative;top:-8px;width:381px;height:476px"></div></div>`); window.scrollTo(0, 0); }""")
         page.wait_for_timeout(1000)
         wait = page.locator('#wait')
         style = lambda el, name: el.evaluate("(el, name) => el.style.getPropertyValue(name)", name)
         check('waiting image: has the icon, stays visible', 'image/svg' in style(wait, 'background-image') and style(wait, 'object-position') != '' and wait.evaluate("el => getComputedStyle(el).visibility") == 'visible')
         check('waiting image: blurred copy has no icon', page.locator('#copy').evaluate("el => el.style.visibility") == 'hidden' and style(page.locator('#copy'), 'background-image') == '')
         check('waiting image: tiny image has no icon', style(page.locator('#tiny'), 'background-image') == '')
+        clipped = style(page.locator('#clipped'), 'background-image')
+        check('waiting image: top clip and side bar count', 'y%3D%2254%22' in clipped and 'x%3D%22-34%22' in clipped, clipped[:80])
         check('waiting image: has the label', 'Dark%20mode.' in style(wait, 'background-image'))
         check('waiting image: small image has the icon without the label', 'image/svg' in style(page.locator('#small'), 'background-image') and 'Dark%20mode.' not in style(page.locator('#small'), 'background-image'))
         a = wait.screenshot(path=f'{work}/waiting.png')

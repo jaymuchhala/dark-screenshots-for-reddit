@@ -2,6 +2,7 @@
   const IMAGE_HOSTS = new Set(['i.redd.it', 'preview.redd.it', 'external-preview.redd.it']);
   const MIN_WIDTH = 80, MIN_HEIGHT = 50;
   const LABEL_MIN_WIDTH = 80, LABEL_MIN_HEIGHT = 60;
+  const WAITING_INSET = 14, WAITING_MAX_TOP = 64;
   const REVEAL_AFTER_MS = 2500;
   const MAX_UPLOAD_BYTES = 30 * 1024 * 1024;
   const MAX_OVERRIDES = 500;
@@ -80,6 +81,24 @@
     return fallback;
   }
 
+  // Where the waiting picture's icon goes, in from the top right corner of what's on show.
+  // An ancestor can clip the box, and a tall image is centered with bars beside it that look
+  // just like its dark box, so the top matches the distance to the edge beyond the bar.
+  function waitingInsets(el, box) {
+    let top = 0, right = 0;
+    for (let a = el.parentElement || el.getRootNode().host; a && a !== document.body; a = a.parentElement || a.getRootNode().host) {
+      if (!/hidden|clip/.test(getComputedStyle(a).overflow)) continue;
+      const clip = a.getBoundingClientRect();
+      if (clip.bottom <= box.top || clip.top >= box.bottom || clip.right <= box.left || clip.left >= box.right) continue;
+      top = Math.max(top, clip.top - box.top);
+      right = Math.max(right, box.right - clip.right);
+    }
+    const parent = el.parentElement && el.parentElement !== document.body ? el.parentElement.getBoundingClientRect() : box;
+    const bar = parent.right - box.right;
+    const centered = bar > 0 && Math.abs(bar - (box.left - parent.left)) < 2;
+    return { top: top + Math.min(WAITING_INSET + (centered ? bar : 0), WAITING_MAX_TOP), right: right + WAITING_INSET };
+  }
+
   // What a waiting image or video shows: a dark box with the icon and "Dark mode..."
   // near its top right corner, the text on one line under the icon, squeezed to its width. Boxes too short for the text
   // get the icon alone. The dots step in time with the sweep: both run for 2s. The delay
@@ -87,6 +106,7 @@
   function waitingPicture(el) {
     const still = matchMedia('(prefers-reduced-motion: reduce)').matches;
     const box = el.getBoundingClientRect();
+    const inset = waitingInsets(el, box);
     const label = !box.height || (box.width >= LABEL_MIN_WIDTH && box.height >= LABEL_MIN_HEIGHT);
     return 'url("data:image/svg+xml,' + encodeURIComponent(`<svg xmlns="http://www.w3.org/2000/svg" width="100%" height="100%">
       <style>
@@ -106,9 +126,9 @@
       </linearGradient>
       <g>
         <rect width="100%" height="100%" fill="#0e1113"/>
-        <svg x="100%" y="14" overflow="visible">
-          <rect class="icon" x="-34" width="20" height="20" rx="4.5" fill="url(#sweep)"/>
-          ${label ? `<text x="-34" y="27" textLength="20" lengthAdjust="spacingAndGlyphs">Dark mode.<tspan class="second">.</tspan><tspan class="third">.</tspan></text>` : ''}
+        <svg x="100%" y="${inset.top}" overflow="visible">
+          <rect class="icon" x="${-inset.right - 20}" width="20" height="20" rx="4.5" fill="url(#sweep)"/>
+          ${label ? `<text x="${-inset.right - 20}" y="27" textLength="20" lengthAdjust="spacingAndGlyphs">Dark mode.<tspan class="second">.</tspan><tspan class="third">.</tspan></text>` : ''}
         </svg>
       </g>
     </svg>`) + '")';
