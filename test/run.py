@@ -254,8 +254,8 @@ with sync_playwright() as p:
         check('waiting image: has the icon, stays visible', 'image/svg' in style(wait, 'background-image') and style(wait, 'object-position') != '' and wait.evaluate("el => getComputedStyle(el).visibility") == 'visible')
         check('waiting image: blurred copy has no icon', page.locator('#copy').evaluate("el => el.style.visibility") == 'hidden' and style(page.locator('#copy'), 'background-image') == '')
         check('waiting image: tiny image has no icon', style(page.locator('#tiny'), 'background-image') == '')
-        check('waiting image: has the label', '%3Emode.' in style(wait, 'background-image'))
-        check('waiting image: small image has the icon without the label', 'image/svg' in style(page.locator('#small'), 'background-image') and '%3Emode.' not in style(page.locator('#small'), 'background-image'))
+        check('waiting image: has the label', 'Dark%20mode.' in style(wait, 'background-image'))
+        check('waiting image: small image has the icon without the label', 'image/svg' in style(page.locator('#small'), 'background-image') and 'Dark%20mode.' not in style(page.locator('#small'), 'background-image'))
         a = wait.screenshot(path=f'{work}/waiting.png')
         corner = """async (shot) => {
           const bitmap = await createImageBitmap(await (await fetch('data:image/png;base64,' + shot)).blob());
@@ -498,7 +498,7 @@ with sync_playwright() as p:
         hold.evaluate(ADD, ['h', {'preview': f'{media}/vid-hold.webm'}, False])
         def after(page, prop): return page.evaluate("prop => getComputedStyle(document.getElementById('h'), '::after')[prop]", prop)
         check('loading icon: shown while checking', lambda: after(hold, 'content') != 'none' and after(hold, 'visibility') == 'visible' and 'image/svg' in after(hold, 'backgroundImage'), after(hold, 'content'))
-        check('loading icon: sweeps, pulses, has the label', all(name in after(hold, 'backgroundImage') for name in ('sweep', 'pulse', '%3Emode.')))
+        check('loading icon: sweeps, pulses, has the label', all(name in after(hold, 'backgroundImage') for name in ('sweep', 'pulse', 'Dark%20mode.')))
         check('loading icon: video stays hidden', hold.evaluate("getComputedStyle(document.getElementById('h').shadowRoot.querySelector('video')).visibility") == 'hidden')
         for i in range(3):
             hold.screenshot(path=f'{work}/applying{i}.png', clip={'x': 0, 'y': 0, 'width': 300, 'height': 170})

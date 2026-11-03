@@ -81,7 +81,7 @@
   }
 
   // What a waiting image or video shows: a dark box with the icon and "Dark mode..."
-  // near its top right corner, the text on two lines under the icon, no wider than it. Boxes too short for the text
+  // near its top right corner, the text on one line under the icon, squeezed to its width. Boxes too short for the text
   // get the icon alone. The dots step in time with the sweep: both run for 2s. The delay
   // keeps it from blinking when the wait is very short.
   function waitingPicture(el) {
@@ -95,7 +95,7 @@
         @keyframes second { 0% { fill-opacity: 0; } 25%, 100% { fill-opacity: 1; } }
         @keyframes third { 0% { fill-opacity: 0; } 50% { fill-opacity: 1; } 75%, 100% { fill-opacity: 0; } }
         g { animation: fade 0.2s ease-out 0.25s both; }
-        text { font: 400 5.2px system-ui, -apple-system, sans-serif; fill: #d7dadc; }
+        text { font: 400 4.5px system-ui, -apple-system, sans-serif; fill: #d7dadc; }
         ${still ? '' : `.icon { transform-box: fill-box; transform-origin: center; animation: pulse 1.4s ease-in-out infinite alternate; }
         .second { animation: second 2s step-end infinite; }
         .third { animation: third 2s step-end infinite; }`}
@@ -108,7 +108,7 @@
         <rect width="100%" height="100%" fill="#0e1113"/>
         <svg x="100%" y="14" overflow="visible">
           <rect class="icon" x="-34" width="20" height="20" rx="4.5" fill="url(#sweep)"/>
-          ${label ? `<text x="-24" y="27" text-anchor="middle">Dark</text><text x="-24" y="33" text-anchor="middle">mode.<tspan class="second">.</tspan><tspan class="third">.</tspan></text>` : ''}
+          ${label ? `<text x="-34" y="27" textLength="20" lengthAdjust="spacingAndGlyphs">Dark mode.<tspan class="second">.</tspan><tspan class="third">.</tspan></text>` : ''}
         </svg>
       </g>
     </svg>`) + '")';
