@@ -64,6 +64,16 @@
     return fallback;
   }
 
+  // The largest size, for an image that gets darkened in parts.
+  function largestUrl(img, fallback) {
+    const last = (img.getAttribute('srcset') || '').split(',').pop().trim().split(/\s+/)[0];
+    try {
+      const url = new URL(last, location.href);
+      if (last && IMAGE_HOSTS.has(url.hostname)) return url.href;
+    } catch {}
+    return fallback;
+  }
+
   function setHidden(img, state, hidden) {
     if (state.hidden === hidden) return;
     state.hidden = hidden;
@@ -76,10 +86,26 @@
     }
   }
 
-  function setDarkened(img, state, dark) {
-    if (state.darkened === dark) return;
+  // `picture` is a partly dark copy of the image, shown in place of the original. CSS
+  // `content` leaves the element, its sizing and any filter of the site's as they are.
+  function setDarkened(img, state, dark, picture = null) {
+    if (!dark) picture = null;
+    if (state.darkened === dark && state.picture === picture) return;
+    if (state.picture) {
+      img.style.removeProperty('content');
+    } else if (state.darkened) {
+      img.style.removeProperty('filter');
+      if (state.filter) img.style.setProperty('filter', state.filter);
+      if (img.localName === 'video') {
+        img.style.removeProperty('background-color');
+        if (state.background) img.style.setProperty('background-color', state.background);
+      }
+    }
     state.darkened = dark;
-    if (dark) {
+    state.picture = picture;
+    if (picture) {
+      img.style.setProperty('content', `url("${picture}")`, 'important');
+    } else if (dark) {
       state.filter = img.style.getPropertyValue('filter');
       // Keep any filter the site has, such as the blur on Reddit's post backdrop.
       const current = getComputedStyle(img).filter;
@@ -89,13 +115,6 @@
       if (img.localName === 'video') {
         state.background = img.style.getPropertyValue('background-color');
         img.style.setProperty('background-color', '#fff', 'important');
-      }
-    } else {
-      img.style.removeProperty('filter');
-      if (state.filter) img.style.setProperty('filter', state.filter);
-      if (img.localName === 'video') {
-        img.style.removeProperty('background-color');
-        if (state.background) img.style.setProperty('background-color', state.background);
       }
     }
   }
@@ -113,7 +132,7 @@
     const key = imageKey(url);
     if (key in overrides) {
       setHidden(img, state, false);
-      setDarkened(img, state, overrides[key]);
+      setDarkened(img, state, overrides[key], verdicts.get(key)?.partial || null);
       return true;
     }
     if (!readerActive(img)) {
@@ -124,7 +143,8 @@
     const stats = verdicts.get(key);
     if (stats === null || (stats && !(stats instanceof Promise))) {
       // A video's verdict is already true or null. An image's depends on the settings.
-      setDarkened(img, state, stats === true || (!!stats && isLightScreenshot(stats, settings.tinted)));
+      const picture = usesPartial(stats, settings.tinted) ? stats.partial : null;
+      setDarkened(img, state, stats === true || !!picture || (!!stats && isLightScreenshot(stats, settings.tinted)), picture);
       setHidden(img, state, false);
       return true;
     }
@@ -150,7 +170,7 @@
     if (verdicts.has(key)) return verdicts.get(key);
     const check = img.localName === 'video'
       ? withVideoSlot(() => isLightVideo(url))
-      : chrome.runtime.sendMessage({ type: 'check-image', url: smallestUrl(img, url) });
+      : chrome.runtime.sendMessage({ type: 'check-image', url: smallestUrl(img, url), fullUrl: largestUrl(img, url) });
     const pending = check
       .catch(() => null)
       .then((result) => {
@@ -170,8 +190,12 @@
         setHidden(img, state, false);
         continue;
       }
-      if (render(img)) continue;
       const url = imageUrl(img);
+      if (render(img)) {
+        // Turned on by hand, an image still needs its verdict to know if it's darkened in parts.
+        if (url && img.localName === 'img' && overrides[imageKey(url)] && chrome.runtime?.id) checkVerdict(img, url);
+        continue;
+      }
       setTimeout(() => setHidden(img, state, false), REVEAL_AFTER_MS);
       checkVerdict(img, url);
     }

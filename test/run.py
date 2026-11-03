@@ -97,6 +97,8 @@ MAKE = """async () => {
     mk('neg-dark-ui.png', 900, 500, (x,w,h)=>{ x.fillStyle='#121212'; x.fillRect(0,0,w,h); x.fillStyle='#eee'; x.font='24px sans-serif'; for(let i=0;i<8;i++) x.fillText('Installs & uninstalls  489',40,60+i*50); }),
     mk('pos-cream-chart.png', 1100, 750, (x,w,h)=>{ x.fillStyle='#feecdc'; x.fillRect(0,0,w,h); x.fillStyle='#f9dccb'; x.fillRect(880,0,220,h); x.strokeStyle='#887'; for(let i=1;i<4;i++){ x.beginPath(); x.moveTo(0,i*170); x.lineTo(w,i*170); x.stroke(); } const cs=['#0a2a8c','#1a7fd6','#d10f0f','#7fae1e']; for(let i=0;i<25;i++){ let y=680; for(const c of cs){ const b=8+((i*7+c.charCodeAt(2))%30)*(1+i/10); x.fillStyle=c; x.fillRect(30+i*42,y-b,30,b); y-=b; } } }),
     mk('neg-red-heatmap.png', 1100, 600, (x,w,h)=>{ x.fillStyle='#000'; x.fillRect(0,0,w,h); for(let i=0;i<30;i++) for(let j=0;j<16;j++){ x.fillStyle='#7f1820'; x.fillRect(i*37+1,j*37+1,35,35); x.fillStyle='#eee'; x.fillRect(i*37+12,j*37+12,12,12); } }),
+    mk('neg-white-sky.jpg', 900, 600, (x,w,h)=>{ x.fillStyle='#fff'; x.fillRect(0,0,w,h); noise(x,0,330,900,270,[90,110,70]); }, 'image/jpeg'),
+    ...[['partial-photos.png', true], ['partial-strict.png', false], ['partial-cream.png', false, '#feecdc']].map(([name, photos, page]) => mk(name, 1200, 800, (x,w,h)=>{ x.fillStyle=page||'#fff'; x.fillRect(0,0,w,h); x.fillStyle='#222'; x.font='18px sans-serif'; for(let i=0;i<26;i++) x.fillText('Lorem ipsum dolor sit amet, consectetur adipiscing elit',30,430+i*14+(i%2)); if(photos){ noise(x,30,30,400,330,[150,130,110]); noise(x,460,30,400,330,[120,140,150]); } x.fillStyle='#14202e'; x.fillRect(900,60,270,photos?360:300); x.fillStyle='#eee'; for(let i=0;i<9;i++) x.fillText('Panel row '+i,920,100+i*30); })),
     mk('pos-text-ui.png', 900, 500, (x,w,h)=>{ x.fillStyle='#fff'; x.fillRect(0,0,w,h); x.fillStyle='#222'; x.font='18px sans-serif'; for(let i=0;i<20;i++) x.fillText('Lorem ipsum dolor sit amet, consectetur adipiscing elit, sed do eiusmod tempor',20,26+i*24); }),
   ]);
 }"""
@@ -123,7 +125,7 @@ with sync_playwright() as p:
     for f in files:
         r = sw.evaluate("async u => { const s = await analyzeBlob(await (await fetch(u)).blob()); return { ...s, screenshot: isLightScreenshot(s, true) }; }", f'{base}/{f}')
         print(f'{f:28} {r["light"]:.2f}   {r["flat"]:.2f}  {r["colorful"]:.2f}   {r["screenshot"]}')
-        check(f'detector {f}', r['screenshot'] == (f.startswith('shot') or f.startswith('pos')))
+        check(f'detector {f}', r['screenshot'] == (f.startswith('shot') or f.startswith('pos') or f in ('partial-strict.png', 'partial-cream.png')))
 
     # Reader
     page.evaluate("""fs => { for (const n of fs) { const i = new Image(); i.src='/'+n; i.alt=n; i.style.width='300px'; i.style.height='200px'; i.style.objectFit='contain'; document.getElementById('f').append(i);} 
@@ -133,11 +135,30 @@ with sync_playwright() as p:
         v = page.locator(f'img[alt="{f}"]').evaluate(FILTERED)
         check(f'reader dark theme {f}', bool(v) == (f.startswith('shot') or f.startswith('pos')), v)
     check('image in shadow root', 'invert' in page.evaluate("document.querySelector('x-host').shadowRoot.querySelector('img').style.filter"))
+    def px(f, x, y):
+        shot = base64.b64encode(page.locator(f'img[alt="{f}"]').screenshot()).decode()
+        return page.evaluate("""async ([shot, x, y]) => {
+          const bitmap = await createImageBitmap(await (await fetch('data:image/png;base64,' + shot)).blob());
+          const ctx = new OffscreenCanvas(bitmap.width, bitmap.height).getContext('2d');
+          ctx.drawImage(bitmap, 0, 0);
+          return [...ctx.getImageData(x * bitmap.width, y * bitmap.height, 1, 1).data].slice(0, 3);
+        }""", [shot, x, y])
+    # Partly dark: the page goes dark, panels and photos keep their colors. The box is
+    # 300x200 with object-fit: contain, and these images are 3:2 too, so points line up.
+    for f in ('partial-photos.png', 'partial-strict.png'):
+        el = page.locator(f'img[alt="{f}"]')
+        check(f'{f}: partly dark, no filter', 'url("data:image/webp' in el.evaluate("el => el.style.content") and not el.evaluate(FILTERED))
+        el.scroll_into_view_if_needed()
+        check(f'{f}: page darkened', max(px(f, .4, .97)) < 60, px(f, .4, .97))
+        check(f'{f}: panel stays dark', px(f, .96, .4)[2] < 80 and px(f, .96, .4)[0] < 60, px(f, .96, .4))
+    check('photo stays as it is', 90 < sum(px('partial-photos.png', .2, .25)) / 3 < 200, px('partial-photos.png', .2, .25))
+    for f in ('neg-product.jpg', 'neg-meme.jpg', 'neg-white-sky.jpg', 'neg-dark-ui.png'):
+        check(f'{f}: not partly dark', not page.locator(f'img[alt="{f}"]').evaluate("el => el.style.content"))
     check('nothing left hidden', page.evaluate("[...document.images].every(i => i.style.visibility !== 'hidden')"))
     page.screenshot(path=f'{work}/reader-dark.png', full_page=True)
     page.emulate_media(color_scheme='light')
     page.wait_for_timeout(200)
-    check('light theme removes it live', page.evaluate("[...document.images].every(i => !i.style.filter)"))
+    check('light theme removes it live', page.evaluate("[...document.images].every(i => !i.style.filter && !i.style.content)"))
     page.emulate_media(color_scheme='dark')
     page.wait_for_timeout(200)
     check('dark theme brings it back', 'invert' in page.locator('img[alt="shot1.png"]').evaluate(FILTERED))
@@ -178,6 +199,28 @@ with sync_playwright() as p:
     check('tinted off still darkens white', 'invert' in page.locator('img[alt="shot1.png"]').evaluate(FILTERED))
     sw.evaluate("chrome.storage.local.set({settings:{tinted:true}})"); page.wait_for_timeout(300)
     check('tinted on darkens the cream chart', 'invert' in page.locator('img[alt="pos-cream-chart.png"]').evaluate(FILTERED))
+
+    # Partly dark images and the settings and override
+    partial = page.locator('img[alt="partial-cream.png"]')
+    content = "el => el.style.content"
+    check('cream page with a panel: partly dark', 'url(' in partial.evaluate(content))
+    sw.evaluate("chrome.storage.local.set({settings:{tinted:false}})"); page.wait_for_timeout(300)
+    check('tinted off leaves the cream page', not partial.evaluate(content) and not partial.evaluate(FILTERED))
+    sw.evaluate("chrome.storage.local.set({settings:{tinted:true}})"); page.wait_for_timeout(300)
+    partial = page.locator('img[alt="partial-photos.png"]')
+    partial.click(button='right'); page.keyboard.press('Escape')
+    sw.evaluate("async () => { for (const t of await chrome.tabs.query({})) chrome.tabs.sendMessage(t.id, {type:'toggle-image'}).catch(()=>{}); }"); page.wait_for_timeout(300)
+    check('override turns partly dark off', not partial.evaluate(content) and not partial.evaluate(FILTERED))
+    sw.evaluate("async () => { for (const t of await chrome.tabs.query({})) chrome.tabs.sendMessage(t.id, {type:'toggle-image'}).catch(()=>{}); }"); page.wait_for_timeout(300)
+    check('override turns partly dark back on', 'url(' in partial.evaluate(content) and not partial.evaluate(FILTERED))
+    keep_overrides = sw.evaluate("chrome.storage.local.get('overrides').then(o => o.overrides)")
+    page.reload(); page.wait_for_timeout(300)
+    page.evaluate("""() => { const i = new Image(); i.src='/partial-photos.png'; i.alt='again'; i.style.width='300px'; document.body.prepend(i); }""")
+    page.wait_for_timeout(1500)
+    check('turned back on survives a reload as partly dark', 'url(' in page.locator('img[alt="again"]').evaluate(content), str(keep_overrides))
+    page.evaluate("""fs => { for (const n of fs) { const i = new Image(); i.src='/'+n; i.alt=n; i.style.width='300px'; i.style.height='200px'; i.style.objectFit='contain'; document.getElementById('f').append(i);} }""", files)
+    page.wait_for_timeout(1500)
+    sw.evaluate("chrome.storage.local.remove('overrides')"); page.wait_for_timeout(200)
 
     # Right-click on an image in a shadow root, then somewhere with no image
     toggle = "async () => { for (const t of await chrome.tabs.query({})) chrome.tabs.sendMessage(t.id, {type:'toggle-image'}).catch(()=>{}); }"

@@ -18,12 +18,19 @@ async function withSlot(job) {
 }
 
 // The page can't read the pixels of images from another host, but the worker can.
-async function checkImage(url) {
-  if (!IMAGE_HOSTS.has(new URL(url).hostname)) return null;
+async function checkImage(url, fullUrl) {
+  const allowed = (u) => IMAGE_HOSTS.has(new URL(u).hostname);
+  if (!allowed(url)) return null;
   return withSlot(async () => {
     const res = await fetch(url, { credentials: 'omit' });
     if (!res.ok) return null;
-    return analyzeBlob(await res.blob());
+    const stats = await analyzeBlob(await res.blob());
+    if (!fullUrl || !allowed(fullUrl) || !mayBePartial(stats)) return stats;
+    try {
+      const full = await fetch(fullUrl, { credentials: 'omit' });
+      if (full.ok) stats.partial = await partialDarken(await full.blob());
+    } catch {}
+    return stats;
   });
 }
 
@@ -46,7 +53,7 @@ chrome.runtime.onMessage.addListener((msg, sender, reply) => {
   if (sender.id !== chrome.runtime.id) return;
   if (msg.type === 'check-build') checkBuild();
   if (msg.type !== 'check-image') return;
-  checkImage(msg.url).then(reply, () => reply(null));
+  checkImage(msg.url, msg.fullUrl).then(reply, () => reply(null));
   return true;
 });
 

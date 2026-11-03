@@ -2,7 +2,7 @@
 
 Turns bright screenshots dark on Reddit, such as Chrome Web Store dashboard shots and payment emails.
 
-- **Screenshots you read:** bright UI screenshots on Reddit are shown dark. By default this follows Chrome's light or dark theme, and it can be set to Always. Photos are left alone.
+- **Screenshots you read:** bright UI screenshots on Reddit are shown dark. By default this follows Chrome's light or dark theme, and it can be set to Always. Photos are left alone. A white page with dark panels or photos on it gets only the page darkened.
 - **Screen recordings (optional, off by default):** light-mode screen recordings and software demos in Reddit's video player are shown dark too. The extension samples five frames from Reddit's small preview copy of each video, and darkens the whole video if at least four look like a bright UI. A video that mixes screen capture with real-life footage is usually left alone. A bright real-life clip, such as a white studio or snow, can be darkened by mistake. Old Reddit, embeds such as YouTube, and uploads aren't covered.
 - **Screenshots you upload:** a bright screenshot chosen, pasted or dropped on Reddit is replaced with a dark copy before Reddit receives it.
 - **Wrong call:** right-click an image or video and choose "Change dark mode".
