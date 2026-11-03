@@ -336,6 +336,7 @@ with sync_playwright() as p:
     add('nopreview', {})
     vid.wait_for_timeout(600)
     check('video hidden while checking', vhidden('ui') == 'hidden' or 'invert' in vfilter('ui'), vhidden('ui'))
+    check('player hidden before its video exists', vid.evaluate("getComputedStyle(document.getElementById('late')).visibility") == 'hidden')
     vid.wait_for_timeout(9000)
     for id in ('ui', 'phone', 'intro', 'gif', 'late'):
         check(f'video {id}: darkened', 'invert' in (vfilter(id) or ''), vfilter(id))
@@ -360,6 +361,21 @@ with sync_playwright() as p:
         }""", shot)
     check('tall video: bars stay dark', bar('phone') <= 40, bar('phone'))
     check('photo video: bars untouched', bar('photo') <= 40, bar('photo'))
+
+    # A reload knows the verdict: the video never shows unfiltered, however late the player draws it.
+    check('verdict saved for the reload', any(k.endswith('/vid-late.webm') and v for k, v in sw.evaluate("chrome.storage.local.get('videoVerdicts')")['videoVerdicts'].items()))
+    again = ctx.new_page(); again.goto(base + '/index.html'); again.wait_for_timeout(200)
+    again.evaluate(ADD, ['re', {'preview': f'{media}/vid-late.webm'}, True])
+    again.evaluate("""() => { window.flashes = 0; const p = document.getElementById('re');
+      const look = () => { const v = p.shadowRoot?.querySelector('video');
+        if (getComputedStyle(p).visibility !== 'hidden' && (!v || !v.style.filter.includes('invert'))) window.flashes++;
+        requestAnimationFrame(look); }; look(); }""")
+    again.wait_for_timeout(2000)
+    check('reload: never shown undarkened', again.evaluate('window.flashes') == 0, again.evaluate('window.flashes'))
+    check('reload: shown dark once drawn', again.evaluate("getComputedStyle(document.getElementById('re')).visibility") == 'visible' and 'invert' in again.evaluate("document.getElementById('re').shadowRoot.querySelector('video').style.filter"))
+    again.evaluate(ADD, ['gone', {'preview': f'{media}/vid-photo.webm'}, False]); again.wait_for_timeout(300)
+    check('reload: a video left alone shows right away', again.evaluate("getComputedStyle(document.getElementById('gone')).visibility") == 'visible' and not again.evaluate("document.getElementById('gone').shadowRoot.querySelector('video').style.filter"))
+    again.close()
 
     # Right-click override on a video
     vid.bring_to_front()

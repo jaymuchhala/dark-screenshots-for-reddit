@@ -5,21 +5,25 @@
   const MAX_UPLOAD_BYTES = 30 * 1024 * 1024;
   const MAX_OVERRIDES = 500;
   const MAX_VIDEO_CHECKS = 2;
-  const PLAYER_TRIES = 20, PLAYER_RETRY_MS = 500;
+  const PLAYER_TRIES = 100, PLAYER_RETRY_MS = 100;
+  const VIDEO_REVEAL_AFTER_MS = 6000;
+  const MAX_SAVED_VIDEOS = 500;
 
   let settings = { reader: true, readerMode: 'theme', videos: false, uploader: true, tinted: true };
   let overrides = {};
+  let savedVideos = {};   // video key -> verdict, so a reload needs no new check
   const systemDark = matchMedia('(prefers-color-scheme: dark)');
 
   // ---------- Reader: darken screenshots already on the page ----------
 
   const verdicts = new Map();   // image key -> pixel stats or null, or a promise while checking
   const tracked = new Map();    // img -> { hidden, darkened, filter, visibility }
+  const players = new Map();    // video player -> { hidden, visibility, timer, expired }
   const observedRoots = new WeakSet();
   let lastRightClicked = null;
 
   // A tab left open across an extension reload has no runtime, so it can't check images.
-  const readerActive = (el) => chrome.runtime?.id && settings.reader && (el.localName !== 'video' || settings.videos) &&
+  const readerActive = (el) => chrome.runtime?.id && settings.reader && (el.localName === 'img' || settings.videos) &&
     (settings.readerMode === 'always' || systemDark.matches);
 
   // Reddit's player keeps a tiny copy of the video in `preview`, and any page can read
@@ -28,9 +32,10 @@
   function videoUrl(video) {
     let player = video.getRootNode().host;
     while (player && !isPlayer(player)) player = player.getRootNode().host;
-    if (!player) return null;
-    return player.getAttribute('preview') || (player.hasAttribute('gif') && player.getAttribute('src')) || null;
+    return player ? playerUrl(player) : null;
   }
+
+  const playerUrl = (player) => player.getAttribute('preview') || (player.hasAttribute('gif') && player.getAttribute('src')) || null;
 
   const isPlayer = (el) => el.localName === 'shreddit-player' || el.localName === 'shreddit-player-2';
 
@@ -151,6 +156,25 @@
     return false;
   }
 
+  // A player stays hidden as a whole until its video has the filter, since its scripts
+  // can draw the video or its poster before this script sees them.
+  function holdPlayer(player) {
+    if (players.has(player) || !playerUrl(player)) return;
+    clearLeftovers(player);
+    players.set(player, { hidden: false, visibility: '', timer: null, expired: false });
+    viewport.observe(player);
+    updatePlayer(player);
+  }
+
+  function updatePlayer(player) {
+    const state = players.get(player);
+    if (!state) return;
+    const key = imageKey(playerUrl(player));
+    const dark = key in overrides ? overrides[key] : readerActive(player) && verdicts.get(key) !== null;
+    const video = player.shadowRoot?.querySelector('video');
+    setHidden(player, state, dark && !tracked.get(video)?.darkened && !state.expired);
+  }
+
   let videoChecks = 0;
   const videoQueue = [];
 
@@ -168,22 +192,41 @@
   function checkVerdict(img, url) {
     const key = imageKey(url);
     if (verdicts.has(key)) return verdicts.get(key);
-    const check = img.localName === 'video'
+    const check = img.localName !== 'img'
       ? withVideoSlot(() => isLightVideo(url))
       : chrome.runtime.sendMessage({ type: 'check-image', url: smallestUrl(img, url), fullUrl: largestUrl(img, url) });
     const pending = check
       .catch(() => null)
       .then((result) => {
         verdicts.set(key, result || null);
+        if (typeof result === 'boolean') saveVideoVerdict(key, result);
         for (const other of tracked.keys()) render(other);
+        for (const player of players.keys()) updatePlayer(player);
       });
     verdicts.set(key, pending);
     return pending;
   }
 
+  function saveVideoVerdict(key, verdict) {
+    savedVideos[key] = verdict;
+    const keys = Object.keys(savedVideos);
+    if (keys.length > MAX_SAVED_VIDEOS) delete savedVideos[keys[0]];
+    chrome.storage.local.set({ videoVerdicts: savedVideos });
+  }
+
   const viewport = new IntersectionObserver((entries) => {
     for (const { target: img, isIntersecting, boundingClientRect: box } of entries) {
       if (!isIntersecting) continue;
+      const held = players.get(img);
+      if (held) {
+        if (!held.hidden) continue;
+        held.timer ??= setTimeout(() => {
+          held.expired = true;
+          updatePlayer(img);
+        }, VIDEO_REVEAL_AFTER_MS);
+        if (readerActive(img)) checkVerdict(img, playerUrl(img));
+        continue;
+      }
       const state = tracked.get(img);
       if (!state) continue;
       if (box.width < MIN_WIDTH || box.height < MIN_HEIGHT) {
@@ -196,7 +239,7 @@
         if (url && img.localName === 'img' && overrides[imageKey(url)] && chrome.runtime?.id) checkVerdict(img, url);
         continue;
       }
-      setTimeout(() => setHidden(img, state, false), REVEAL_AFTER_MS);
+      setTimeout(() => setHidden(img, state, false), img.localName === 'video' ? VIDEO_REVEAL_AFTER_MS : REVEAL_AFTER_MS);
       checkVerdict(img, url);
     }
   }, { rootMargin: '600px' });
@@ -221,12 +264,14 @@
     }
     // Hidden from the start so an unchecked screenshot never flashes white.
     if (!render(img) && readerActive(img)) setHidden(img, state, true);
+    updatePlayer(img.getRootNode().host);
   }
 
   const isMedia = (el) => el.localName === 'img' || el.localName === 'video';
 
   // The player's scripts load late, so a shadow root may not exist yet.
   function watchLate(el, tries = PLAYER_TRIES) {
+    if (isPlayer(el)) holdPlayer(el);
     if (el.shadowRoot) watchRoot(el.shadowRoot);
     else if (tries && el.isConnected) setTimeout(() => watchLate(el, tries - 1), PLAYER_RETRY_MS);
   }
@@ -250,6 +295,12 @@
       if (!img.isConnected) {
         viewport.unobserve(img);
         tracked.delete(img);
+      }
+    }
+    for (const player of players.keys()) {
+      if (!player.isConnected) {
+        viewport.unobserve(player);
+        players.delete(player);
       }
     }
   }
@@ -288,6 +339,11 @@
       viewport.observe(img);
       if (!render(img) && readerActive(img)) setHidden(img, tracked.get(img), true);
     }
+    for (const player of players.keys()) {
+      updatePlayer(player);
+      viewport.unobserve(player);
+      viewport.observe(player);
+    }
   }
 
   systemDark.addEventListener('change', refreshAll);
@@ -321,6 +377,7 @@
     if (keys.length > MAX_OVERRIDES) delete overrides[keys[0]];
     chrome.storage.local.set({ overrides });
     for (const img of tracked.keys()) render(img);
+    for (const player of players.keys()) updatePlayer(player);
   });
 
   // ---------- Uploader: swap screenshots for dark copies before the page gets them ----------
@@ -417,14 +474,18 @@
 
   chrome.storage.onChanged.addListener((changes, area) => {
     if (area !== 'local') return;
+    if (changes.videoVerdicts) savedVideos = changes.videoVerdicts.newValue || {};
+    if (!changes.settings && !changes.overrides) return;
     if (changes.settings) settings = { ...settings, ...changes.settings.newValue };
     if (changes.overrides) overrides = changes.overrides.newValue || {};
     refreshAll();
   });
 
-  chrome.storage.local.get(['settings', 'overrides']).then((stored) => {
+  chrome.storage.local.get(['settings', 'overrides', 'videoVerdicts']).then((stored) => {
     settings = { ...settings, ...stored.settings };
     overrides = stored.overrides || {};
+    savedVideos = stored.videoVerdicts || {};
+    for (const [key, verdict] of Object.entries(savedVideos)) verdicts.set(key, verdict || null);
     watchRoot(document);
   });
 
