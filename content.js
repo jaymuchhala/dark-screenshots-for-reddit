@@ -1,7 +1,7 @@
 (() => {
   const IMAGE_HOSTS = new Set(['i.redd.it', 'preview.redd.it', 'external-preview.redd.it']);
   const MIN_WIDTH = 80, MIN_HEIGHT = 50;
-  const LABEL_MIN_WIDTH = 100, LABEL_MIN_HEIGHT = 110;
+  const LABEL_MIN_WIDTH = 80, LABEL_MIN_HEIGHT = 60;
   const REVEAL_AFTER_MS = 2500;
   const MAX_UPLOAD_BYTES = 30 * 1024 * 1024;
   const MAX_OVERRIDES = 500;
@@ -80,15 +80,14 @@
     return fallback;
   }
 
-  // What a waiting image or video shows: a dark box with the icon and "Applying dark mode"
-  // near its top right corner. The line is 13 letters, so the icon is sized to hold it at
-  // a readable size. Boxes too small for that get a small icon alone. The dots step in time
-  // with the sweep: both run for 2s. The delay keeps it from blinking when the wait is very short.
+  // What a waiting image or video shows: a dark box with the icon and "Dark mode..."
+  // near its top right corner, the icon centered over the text. Boxes too short for the text
+  // get the icon alone. The dots step in time with the sweep: both run for 2s. The delay
+  // keeps it from blinking when the wait is very short.
   function waitingPicture(el) {
     const still = matchMedia('(prefers-reduced-motion: reduce)').matches;
     const box = el.getBoundingClientRect();
     const label = !box.height || (box.width >= LABEL_MIN_WIDTH && box.height >= LABEL_MIN_HEIGHT);
-    const size = label ? 56 : 16;
     return 'url("data:image/svg+xml,' + encodeURIComponent(`<svg xmlns="http://www.w3.org/2000/svg" width="100%" height="100%">
       <style>
         @keyframes fade { from { opacity: 0; } to { opacity: 1; } }
@@ -101,16 +100,15 @@
         .second { animation: second 2s step-end infinite; }
         .third { animation: third 2s step-end infinite; }`}
       </style>
-      <linearGradient id="sweep" gradientUnits="userSpaceOnUse" x2="${size * 2}" y2="${size * 2}" spreadMethod="repeat">
+      <linearGradient id="sweep" gradientUnits="userSpaceOnUse" x2="32" y2="32" spreadMethod="repeat">
         <stop offset="0" stop-color="#f6f7f8"/><stop offset="0.25" stop-color="#181b1e"/><stop offset="0.5" stop-color="#f6f7f8"/><stop offset="0.75" stop-color="#181b1e"/><stop offset="1" stop-color="#f6f7f8"/>
-        ${still ? '' : `<animateTransform attributeName="gradientTransform" type="translate" from="0" to="${size * 2}" dur="2s" repeatCount="indefinite"/>`}
+        ${still ? '' : '<animateTransform attributeName="gradientTransform" type="translate" from="0" to="32" dur="2s" repeatCount="indefinite"/>'}
       </linearGradient>
       <g>
         <rect width="100%" height="100%" fill="#0e1113"/>
         <svg x="100%" y="14" overflow="visible">
-          <rect class="icon" x="${-14 - size}" width="${size}" height="${size}" rx="${size * 0.22}" fill="url(#sweep)"/>
-          ${label ? `<text x="${-14 - size}" y="${size + 16}" textLength="${size}" lengthAdjust="spacingAndGlyphs">Applying dark</text>
-          <text x="${-14 - size / 2}" y="${size + 27}" text-anchor="middle">mode.<tspan class="second">.</tspan><tspan class="third">.</tspan></text>` : ''}
+          <rect class="icon" x="${label ? -48 : -30}" width="16" height="16" rx="3.5" fill="url(#sweep)"/>
+          ${label ? `<text x="-40" y="29" text-anchor="middle">Dark mode.<tspan class="second">.</tspan><tspan class="third">.</tspan></text>` : ''}
         </svg>
       </g>
     </svg>`) + '")';

@@ -247,31 +247,31 @@ with sync_playwright() as p:
           <img id=wait src="/crawl-icon.png" style="width:300px;height:200px;background-color:rgb(1,2,3)">
           <img id=copy class="post-background-image-filter" src="/crawl-copy.png" style="width:300px;height:200px">
           <img id=tiny src="/crawl-tiny.png" style="width:40px;height:40px">
-          <img id=small src="/crawl-small.png" style="width:100px;height:60px"></div>`); window.scrollTo(0, 0); }""")
+          <img id=small src="/crawl-small.png" style="width:100px;height:50px"></div>`); window.scrollTo(0, 0); }""")
         page.wait_for_timeout(1000)
         wait = page.locator('#wait')
         style = lambda el, name: el.evaluate("(el, name) => el.style.getPropertyValue(name)", name)
         check('waiting image: has the icon, stays visible', 'image/svg' in style(wait, 'background-image') and style(wait, 'object-position') != '' and wait.evaluate("el => getComputedStyle(el).visibility") == 'visible')
         check('waiting image: blurred copy has no icon', page.locator('#copy').evaluate("el => el.style.visibility") == 'hidden' and style(page.locator('#copy'), 'background-image') == '')
         check('waiting image: tiny image has no icon', style(page.locator('#tiny'), 'background-image') == '')
-        check('waiting image: has the label', 'Applying%20dark' in style(wait, 'background-image'))
-        check('waiting image: small image has the icon without the label', 'image/svg' in style(page.locator('#small'), 'background-image') and 'Applying' not in style(page.locator('#small'), 'background-image'))
+        check('waiting image: has the label', 'Dark%20mode' in style(wait, 'background-image'))
+        check('waiting image: small image has the icon without the label', 'image/svg' in style(page.locator('#small'), 'background-image') and 'Dark%20mode' not in style(page.locator('#small'), 'background-image'))
         a = wait.screenshot(path=f'{work}/waiting.png')
         corner = """async (shot) => {
           const bitmap = await createImageBitmap(await (await fetch('data:image/png;base64,' + shot)).blob());
           const ctx = new OffscreenCanvas(bitmap.width, bitmap.height).getContext('2d');
           ctx.drawImage(bitmap, 0, 0);
           const at = (x, y) => [...ctx.getImageData(x, y, 1, 1).data].slice(0, 3);
-          return { icon: [...ctx.getImageData(bitmap.width - 30, 14, 16, 16).data].join(), label: [...ctx.getImageData(bitmap.width - 70, 74, 56, 12).data].join(), dots: [...ctx.getImageData(bitmap.width - 70, 85, 56, 12).data].join(), middle: at(150, 150), edge: at(bitmap.width - 8, 8) };
+          return { icon: [...ctx.getImageData(bitmap.width - 48, 14, 16, 16).data].join(), label: [...ctx.getImageData(bitmap.width - 74, 34, 64, 12).data].join(), middle: at(150, 150), edge: at(bitmap.width - 8, 8) };
         }"""
         first = page.evaluate(corner, base64.b64encode(a).decode())
         check('waiting image: dark box', first['middle'] == [14, 17, 19] and first['edge'] == [14, 17, 19], first['middle'])
         check('waiting image: icon drawn', first['icon'].count('14,17,19,255') < 256 / 4, first['icon'][:40])
-        check('waiting image: label drawn', first['label'].count('14,17,19,255') < 56 * 12)
+        check('waiting image: label drawn', first['label'].count('14,17,19,255') < 64 * 12)
         page.wait_for_timeout(120)
         second = page.evaluate(corner, base64.b64encode(wait.screenshot()).decode())
         check('waiting image: icon moves', first['icon'] != second['icon'])
-        check('waiting image: dots change', lambda: style(wait, 'background-image') and first['dots'] != page.evaluate(corner, base64.b64encode(wait.screenshot()).decode())['dots'])
+        check('waiting image: dots change', lambda: style(wait, 'background-image') and first['label'] != page.evaluate(corner, base64.b64encode(wait.screenshot()).decode())['label'])
         until(lambda: not style(wait, 'background-image'))
         check('waiting image: icon gone after the check', style(wait, 'background-image') == '' and style(wait, 'object-position') == '')
         check('waiting image: its own background is back', style(wait, 'background-color') == 'rgb(1, 2, 3)')
@@ -498,7 +498,7 @@ with sync_playwright() as p:
         hold.evaluate(ADD, ['h', {'preview': f'{media}/vid-hold.webm'}, False])
         def after(page, prop): return page.evaluate("prop => getComputedStyle(document.getElementById('h'), '::after')[prop]", prop)
         check('loading icon: shown while checking', lambda: after(hold, 'content') != 'none' and after(hold, 'visibility') == 'visible' and 'image/svg' in after(hold, 'backgroundImage'), after(hold, 'content'))
-        check('loading icon: sweeps, pulses, has the label', all(name in after(hold, 'backgroundImage') for name in ('sweep', 'pulse', 'Applying%20dark')))
+        check('loading icon: sweeps, pulses, has the label', all(name in after(hold, 'backgroundImage') for name in ('sweep', 'pulse', 'Dark%20mode')))
         check('loading icon: video stays hidden', hold.evaluate("getComputedStyle(document.getElementById('h').shadowRoot.querySelector('video')).visibility") == 'hidden')
         for i in range(3):
             hold.screenshot(path=f'{work}/applying{i}.png', clip={'x': 0, 'y': 0, 'width': 300, 'height': 170})
