@@ -17,8 +17,8 @@
   // ---------- Reader: darken screenshots already on the page ----------
 
   const verdicts = new Map();   // image key -> pixel stats or null, or a promise while checking
-  const tracked = new Map();    // img -> { hidden, darkened, filter, visibility }
-  const players = new Map();    // video player -> { hidden, visibility, timer, expired }
+  const tracked = new Map();    // img -> { hidden, darkened, filter, held }
+  const players = new Map();    // video player -> { hidden, held, timer, expired }
   const observedRoots = new WeakSet();
   let lastRightClicked = null;
 
@@ -79,15 +79,59 @@
     return fallback;
   }
 
+  // The icon from content.css, for an image: an `img` can't have ::before, but it can
+  // have a background. The delay keeps it from blinking when the wait is very short.
+  function waitingPicture() {
+    const still = matchMedia('(prefers-reduced-motion: reduce)').matches;
+    return 'url("data:image/svg+xml,' + encodeURIComponent(`<svg xmlns="http://www.w3.org/2000/svg" width="100%" height="100%">
+      <style>
+        @keyframes fade { from { opacity: 0; } to { opacity: 1; } }
+        @keyframes pulse { from { transform: scale(1); } to { transform: scale(1.14); } }
+        g { animation: fade 0.2s ease-out 0.25s both; }
+        ${still ? '' : '.icon { transform-box: fill-box; transform-origin: center; animation: pulse 1.4s ease-in-out infinite alternate; }'}
+      </style>
+      <linearGradient id="sweep" gradientUnits="userSpaceOnUse" x2="32" y2="32" spreadMethod="repeat">
+        <stop offset="0" stop-color="#f6f7f8"/><stop offset="0.25" stop-color="#181b1e"/><stop offset="0.5" stop-color="#f6f7f8"/><stop offset="0.75" stop-color="#181b1e"/><stop offset="1" stop-color="#f6f7f8"/>
+        ${still ? '' : '<animateTransform attributeName="gradientTransform" type="translate" from="0" to="32" dur="2s" repeatCount="indefinite"/>'}
+      </linearGradient>
+      <g>
+        <rect width="100%" height="100%" fill="#0e1113"/>
+        <svg x="100%" y="14" overflow="visible"><rect class="icon" x="-30" width="16" height="16" rx="3.5" fill="url(#sweep)"/></svg>
+      </g>
+    </svg>`) + '")';
+  }
+
+  // Reddit stacks blurred, faded copies behind its images. The icon belongs on the image.
+  const isBackdrop = (img) => /post-background-image-filter|blur-\[/.test(img.className) || getComputedStyle(img).filter !== 'none';
+
+  // Moving the picture out of its own box hides it and leaves the box, with its
+  // background, on show. `transparent` covers any placeholder color of the site's.
+  function holdStyles(el) {
+    if (el.localName !== 'img' || isBackdrop(el)) return { visibility: 'hidden' };
+    return {
+      'object-position': '-99999px -99999px',
+      'background-color': 'transparent',
+      'background-image': waitingPicture(),
+      'background-position': '0 0',
+      'background-size': '100% 100%',
+      'background-repeat': 'no-repeat',
+    };
+  }
+
   function setHidden(img, state, hidden) {
     if (state.hidden === hidden) return;
     state.hidden = hidden;
     if (hidden) {
-      state.visibility = img.style.getPropertyValue('visibility');
-      img.style.setProperty('visibility', 'hidden', 'important');
+      state.held = {};
+      for (const [name, value] of Object.entries(holdStyles(img))) {
+        state.held[name] = img.style.getPropertyValue(name);
+        img.style.setProperty(name, value, 'important');
+      }
     } else {
-      img.style.removeProperty('visibility');
-      if (state.visibility) img.style.setProperty('visibility', state.visibility);
+      for (const [name, value] of Object.entries(state.held)) {
+        img.style.removeProperty(name);
+        if (value) img.style.setProperty(name, value);
+      }
     }
   }
 
@@ -161,7 +205,7 @@
   function holdPlayer(player) {
     if (players.has(player) || !playerUrl(player)) return;
     clearLeftovers(player);
-    players.set(player, { hidden: false, visibility: '', timer: null, expired: false });
+    players.set(player, { hidden: false, held: {}, timer: null, expired: false });
     viewport.observe(player);
     updatePlayer(player);
   }
@@ -250,7 +294,7 @@
   // dropped from `tracked` and put back, so an image can arrive with these styles
   // already on it. Only this script sets them as important.
   function clearLeftovers(img) {
-    for (const name of ['visibility', 'filter', 'background-color']) {
+    for (const name of ['visibility', 'filter', 'object-position', 'background-color', 'background-image', 'background-position', 'background-size', 'background-repeat']) {
       if (img.style.getPropertyPriority(name) === 'important') img.style.removeProperty(name);
     }
   }
@@ -260,7 +304,7 @@
     let state = tracked.get(img);
     if (!state) {
       clearLeftovers(img);
-      state = { hidden: false, darkened: false, filter: '', visibility: '', background: '' };
+      state = { hidden: false, darkened: false, filter: '', held: {}, background: '' };
       tracked.set(img, state);
       viewport.observe(img);
     }

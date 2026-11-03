@@ -31,6 +31,7 @@ class Q(http.server.SimpleHTTPRequestHandler):
     def log_message(self, *a): pass
     def do_GET(self):
         if 'slow' in self.path: time.sleep(.5)
+        if 'crawl' in self.path: time.sleep(2)
         super().do_GET()
 srv = http.server.ThreadingHTTPServer(('localhost', 0), Q)
 threading.Thread(target=srv.serve_forever, daemon=True).start()
@@ -203,6 +204,42 @@ with sync_playwright() as p:
     shutil.copy(f'{site}/shot2.png', f'{site}/slow.png')
     page.evaluate("""() => { const b=document.createElement('div'); b.id='box'; b.style.cssText='height:20px'; const i=new Image(); i.id='late'; i.style.cssText='width:300px;height:100%'; b.append(i); document.body.append(b); i.src='/slow.png'; i.addEventListener('load', () => { b.style.height='200px'; }, {once:true}); }""")
     page.locator('#box').evaluate('el => el.scrollIntoView()')
+    # The loading icon on a waiting image. crawl-* takes 2s per request, so it's still waiting.
+    shutil.copy(f'{site}/shot3.png', f'{site}/crawl-icon.png')
+    shutil.copy(f'{site}/shot3.png', f'{site}/crawl-copy.png')
+    shutil.copy(f'{site}/shot3.png', f'{site}/crawl-tiny.png')
+    page.evaluate("""() => { document.body.insertAdjacentHTML('afterbegin', `<div id=icons style="position:relative;height:200px">
+      <img id=wait src="/crawl-icon.png" style="width:300px;height:200px;background-color:rgb(1,2,3)">
+      <img id=copy class="post-background-image-filter" src="/crawl-copy.png" style="width:300px;height:200px">
+      <img id=tiny src="/crawl-tiny.png" style="width:40px;height:40px"></div>`); window.scrollTo(0, 0); }""")
+    page.wait_for_timeout(1000)
+    wait = page.locator('#wait')
+    style = lambda el, name: el.evaluate("(el, name) => el.style.getPropertyValue(name)", name)
+    check('waiting image: has the icon, stays visible', 'image/svg' in style(wait, 'background-image') and style(wait, 'object-position') != '' and wait.evaluate("el => getComputedStyle(el).visibility") == 'visible')
+    check('waiting image: blurred copy has no icon', page.locator('#copy').evaluate("el => el.style.visibility") == 'hidden' and style(page.locator('#copy'), 'background-image') == '')
+    check('waiting image: tiny image has no icon', style(page.locator('#tiny'), 'background-image') == '')
+    a = wait.screenshot(path=f'{work}/waiting.png')
+    corner = """async (shot) => {
+      const bitmap = await createImageBitmap(await (await fetch('data:image/png;base64,' + shot)).blob());
+      const ctx = new OffscreenCanvas(bitmap.width, bitmap.height).getContext('2d');
+      ctx.drawImage(bitmap, 0, 0);
+      const at = (x, y) => [...ctx.getImageData(x, y, 1, 1).data].slice(0, 3);
+      return { icon: [...ctx.getImageData(bitmap.width - 30, 14, 16, 16).data].join(), middle: at(150, 150), edge: at(bitmap.width - 8, 8) };
+    }"""
+    first = page.evaluate(corner, base64.b64encode(a).decode())
+    check('waiting image: dark box', first['middle'] == [14, 17, 19] and first['edge'] == [14, 17, 19], first['middle'])
+    check('waiting image: icon drawn', first['icon'].count('14,17,19,255') < 256 / 4, first['icon'][:40])
+    page.wait_for_timeout(120)
+    second = page.evaluate(corner, base64.b64encode(wait.screenshot()).decode())
+    check('waiting image: icon moves', first['icon'] != second['icon'])
+    for _ in range(60):
+        if not style(wait, 'background-image'): break
+        page.wait_for_timeout(100)
+    check('waiting image: icon gone after the check', style(wait, 'background-image') == '' and style(wait, 'object-position') == '')
+    check('waiting image: its own background is back', style(wait, 'background-color') == 'rgb(1, 2, 3)')
+    check('waiting image: darkened', 'invert' in wait.evaluate(FILTERED) or 'data:image/webp' in style(wait, 'content'))
+    # Back down to the images below, which only get checked near the viewport.
+    page.evaluate("document.getElementById('icons').remove(); window.scrollTo(0, document.documentElement.scrollHeight)")
     # Three slow requests: the page's, the check's, and the full size for partial darkening.
     for _ in range(80):
         if 'invert' in page.locator('#late').evaluate(FILTERED): break
