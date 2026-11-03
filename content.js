@@ -223,55 +223,10 @@
 
   // ---------- Right-click override ----------
 
-  function deepElementsAt(root, x, y, out = []) {
-    for (const el of root.elementsFromPoint(x, y)) {
-      if (out.includes(el)) continue;
-      out.push(el);
-      if (el.shadowRoot) deepElementsAt(el.shadowRoot, x, y, out);
-    }
-    return out;
-  }
-
-  const isCheckable = (img) => {
-    const box = img.getBoundingClientRect();
-    return box.width >= MIN_WIDTH && box.height >= MIN_HEIGHT;
-  };
-
-  // The image under the pointer, even with Reddit's links laid over it. An image can
-  // also be missed by hit testing, such as while it's hidden for checking, so its box
-  // is the fallback, smallest first to prefer a post image over its blurred backdrop.
-  function imageAt(x, y) {
-    const hit = deepElementsAt(document, x, y).find((el) => tracked.has(el) && isCheckable(el));
-    if (hit) return hit;
-    let best = null, bestArea = Infinity;
-    for (const img of tracked.keys()) {
-      const box = img.getBoundingClientRect();
-      const area = box.width * box.height;
-      if (x < box.left || x > box.right || y < box.top || y > box.bottom) continue;
-      if (area < bestArea && isCheckable(img)) { best = img; bestArea = area; }
-    }
-    return best;
-  }
-
   window.addEventListener('contextmenu', (e) => {
-    lastRightClicked = imageAt(e.clientX, e.clientY);
+    const el = e.composedPath()[0];
+    lastRightClicked = el?.localName === 'img' ? el : null;
   }, true);
-
-  // The menu is built as soon as the right-click lands, too soon to change it then, so
-  // its item is kept up to date while the pointer moves. Moves stay on the same element
-  // when a link covers the whole post, so `pointerover` wouldn't be enough.
-  let menuVisible = null, menuCheckedAt = 0;
-  window.addEventListener('pointermove', (e) => {
-    if (e.timeStamp - menuCheckedAt < 100 || !chrome.runtime?.id) return;
-    menuCheckedAt = e.timeStamp;
-    const visible = !!imageAt(e.clientX, e.clientY);
-    if (visible === menuVisible) return;
-    menuVisible = visible;
-    chrome.runtime.sendMessage({ type: 'menu-visible', visible }).catch(() => {});
-  }, { capture: true, passive: true });
-  // Another tab may have changed the item since this one last set it.
-  window.addEventListener('focus', () => { menuVisible = null; });
-  document.addEventListener('visibilitychange', () => { menuVisible = null; });
 
   chrome.runtime.onMessage.addListener((msg) => {
     if (msg.type !== 'toggle-image' || !lastRightClicked) return;

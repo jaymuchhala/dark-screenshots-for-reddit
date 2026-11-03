@@ -134,37 +134,23 @@ with sync_playwright() as p:
     sw.evaluate("chrome.storage.local.set({settings:{tinted:true}})"); page.wait_for_timeout(300)
     check('tinted on darkens the cream chart', 'invert' in page.locator('img[alt="pos-cream-chart.png"]').evaluate(FILTERED))
 
-    # Right-click with a full-card link over the image, as on Reddit's feed
-    page.evaluate("""() => { const d=document.createElement('div'); d.id='card'; d.style.cssText='position:relative;width:300px;height:200px';
-       const h=document.createElement('x-media'); h.style.cssText='display:block;width:100%;height:100%'; const s=h.attachShadow({mode:'open'});
-       const i=new Image(); i.id='covered'; i.src='/shot4.png?card'; i.style.cssText='width:100%;height:100%;object-fit:contain'; s.append(i);
-       const a=document.createElement('a'); a.href='#'; a.style.cssText='position:absolute;inset:0'; d.append(h,a); document.body.prepend(d); }""")
+    # Right-click on an image in a shadow root, then somewhere with no image
+    toggle = "async () => { for (const t of await chrome.tabs.query({})) chrome.tabs.sendMessage(t.id, {type:'toggle-image'}).catch(()=>{}); }"
+    page.evaluate("""() => { const h=document.createElement('x-media'); h.style.cssText='display:block;width:300px;height:200px'; const s=h.attachShadow({mode:'open'});
+       const i=new Image(); i.src='/shot4.png?card'; i.style.cssText='width:100%;height:100%;object-fit:contain'; s.append(i); document.body.prepend(h); }""")
     page.wait_for_timeout(1000)
-    covered = "document.querySelector('x-media').shadowRoot.querySelector('img').style.filter"
-    sw.evaluate("""() => { self.menuCalls = []; const u = chrome.contextMenus.update; chrome.contextMenus.update = (id, p) => { self.menuCalls.push(p.visible); return u.call(chrome.contextMenus, id, p); }; }""")
-    page.evaluate("scrollTo(0, 0)")
-    box = page.locator('#card').bounding_box()
-    page.mouse.move(1290, 880); page.wait_for_timeout(200)
-    page.mouse.move(1285, 885); page.wait_for_timeout(300)
-    page.mouse.move(box['x'] + 150, box['y'] + 100); page.wait_for_timeout(300)
-    page.mouse.move(box['x'] + 152, box['y'] + 102); page.wait_for_timeout(300)
-    check('menu shown over a covered image', sw.evaluate("self.menuCalls.at(-1)") is True, sw.evaluate("self.menuCalls"))
-    was = page.evaluate(covered)
-    check('covered image starts dark', 'invert' in was, was)
+    shadowed = "document.querySelector('x-media').shadowRoot.querySelector('img').style.filter"
+    check('shadow image starts dark', 'invert' in page.evaluate(shadowed))
+    box = page.locator('x-media').bounding_box()
     page.mouse.click(box['x'] + 150, box['y'] + 100, button='right')
     page.keyboard.press('Escape')
-    sw.evaluate("async () => { for (const t of await chrome.tabs.query({})) chrome.tabs.sendMessage(t.id, {type:'toggle-image'}).catch(()=>{}); }")
-    page.wait_for_timeout(300)
-    check('override works under a link', not page.evaluate(covered))
+    sw.evaluate(toggle); page.wait_for_timeout(300)
+    check('override works in a shadow root', not page.evaluate(shadowed))
     sw.evaluate("chrome.storage.local.remove('overrides')"); page.wait_for_timeout(200)
-    page.mouse.move(1290, 880); page.wait_for_timeout(200)
-    page.mouse.move(1285, 885); page.wait_for_timeout(300)
-    check('menu hidden off images', sw.evaluate("self.menuCalls.at(-1)") is False, sw.evaluate("self.menuCalls"))
     page.mouse.click(1285, 885, button='right')
     page.keyboard.press('Escape')
     before = page.locator('img[alt="shot2.png"]').evaluate(FILTERED)
-    sw.evaluate("async () => { for (const t of await chrome.tabs.query({})) chrome.tabs.sendMessage(t.id, {type:'toggle-image'}).catch(()=>{}); }")
-    page.wait_for_timeout(200)
+    sw.evaluate(toggle); page.wait_for_timeout(200)
     check('toggle off an image does nothing', page.locator('img[alt="shot2.png"]').evaluate(FILTERED) == before)
 
     # Uploader: a Reddit-style input in an open shadow root, with listeners that record what the page receives.
