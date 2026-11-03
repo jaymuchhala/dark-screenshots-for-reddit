@@ -68,16 +68,20 @@ async function readSettings() {
 // ---------- The model, which can stop an image from being darkened ----------
 
 let offscreenReady = null;
-async function toOffscreen(msg) {
+async function openOffscreen() {
   offscreenReady ??= (async () => {
     if (await chrome.offscreen.hasDocument()) return;
     await chrome.offscreen.createDocument({
       url: 'offscreen.html',
       reasons: ['DOM_PARSER'],
-      justification: 'Run the on-device model that tells screen captures from other images',
+      justification: 'Run the on-device models that tell screen captures from other images and find people in video',
     });
   })().finally(() => { offscreenReady = null; });
   await offscreenReady;
+}
+
+async function toOffscreen(msg) {
+  await openOffscreen();
   return chrome.runtime.sendMessage({ target: 'offscreen', ...msg });
 }
 
@@ -106,6 +110,11 @@ chrome.runtime.onMessage.addListener((msg, sender, reply) => {
   if (msg.type === 'check-build') checkBuild();
   if (msg.type === 'is-screen') {
     isScreen(msg.pixels).then(reply);
+    return true;
+  }
+  // A video's people go straight to the page from the tab, many times a second.
+  if (msg.type === 'open-offscreen') {
+    openOffscreen().then(() => reply(true), () => reply(false));
     return true;
   }
   if (msg.type !== 'check-image') return;

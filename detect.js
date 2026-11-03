@@ -63,7 +63,7 @@ const SCREEN_INPUT_SIZE = 224;
 // Page only: the worker has no video element. Samples frames across the whole video,
 // because a poster or a single frame can be a white title card on real-life footage.
 // Returns how many frames `look(data, w, h)` said yes to.
-async function countVideoFrames(url, samples, size, look) {
+async function countVideoFrames(url, samples, size, look, timeout = VIDEO_TIMEOUT_MS) {
   const video = document.createElement('video');
   video.crossOrigin = 'anonymous';
   video.muted = true;
@@ -87,7 +87,7 @@ async function countVideoFrames(url, samples, size, look) {
       video.currentTime = video.duration * (i + 0.5) / samples;
       await seeked;
       ctx.drawImage(video, 0, 0, w, h);
-      if (look(ctx.getImageData(0, 0, w, h).data, w, h)) hits++;
+      if (await look(ctx.getImageData(0, 0, w, h).data, w, h, ctx)) hits++;
     }
     return hits;
   };
@@ -95,7 +95,7 @@ async function countVideoFrames(url, samples, size, look) {
   try {
     return await Promise.race([
       sample(),
-      new Promise((_, reject) => { timer = setTimeout(reject, VIDEO_TIMEOUT_MS); }),
+      new Promise((_, reject) => { timer = setTimeout(reject, timeout); }),
     ]);
   } finally {
     clearTimeout(timer);
@@ -450,14 +450,126 @@ async function screenPixels(blob) {
   context.fillRect(0, 0, SCREEN_INPUT_SIZE, SCREEN_INPUT_SIZE);
   context.drawImage(bitmap, 0, 0, SCREEN_INPUT_SIZE, SCREEN_INPUT_SIZE);
   bitmap.close();
-  const rgba = context.getImageData(0, 0, SCREEN_INPUT_SIZE, SCREEN_INPUT_SIZE).data;
-  const chars = new Array(SCREEN_INPUT_SIZE * SCREEN_INPUT_SIZE * 3);
+  return rgbBase64(context.getImageData(0, 0, SCREEN_INPUT_SIZE, SCREEN_INPUT_SIZE).data);
+}
+
+function rgbBase64(rgba) {
+  const chars = new Array(rgba.length / 4 * 3);
   for (let i = 0, n = 0; i < rgba.length; i += 4) {
     chars[n++] = String.fromCharCode(rgba[i]);
     chars[n++] = String.fromCharCode(rgba[i + 1]);
     chars[n++] = String.fromCharCode(rgba[i + 2]);
   }
   return btoa(chars.join(''));
+}
+
+// ---------- People in a darkened video, who should keep their real colors ----------
+//
+// MediaPipe's selfie segmenter takes 256x256 and only finds someone who fills a good part of
+// that, so a webcam in the corner of a recording needs crops, not the whole frame. A one-time
+// scan looks for people in a few frames. After that only the area around them is looked at.
+const PEOPLE_INPUT = 256;
+const PEOPLE_SCAN_TIMEOUT_MS = 30000;
+const PEOPLE_MASK = 128;
+const PEOPLE_SCAN_FRAMES = 4;
+const PEOPLE_SCAN_SIZE = 960;
+const PEOPLE_TILE_SIDES = [1, 0.5];   // of the frame's short side
+const PEOPLE_MIN_SHARE = 0.015;       // of a crop's mask
+const PEOPLE_MARGIN = 1.6;
+const PEOPLE_MIN_SIDE = 0.25;         // of the frame's short side
+const PEOPLE_MAX_REGIONS = 2;
+const PEOPLE_FULL = 128;              // mask value that counts as a person
+
+// Square crops, in pixels, that overlap by about a third.
+function peopleTiles(width, height) {
+  const tiles = [];
+  for (const share of PEOPLE_TILE_SIDES) {
+    const side = Math.round(Math.min(width, height) * share);
+    const columns = Math.ceil((width - side) / (side * 0.7)) + 1, rows = Math.ceil((height - side) / (side * 0.7)) + 1;
+    for (let j = 0; j < rows; j++) {
+      for (let i = 0; i < columns; i++) {
+        tiles.push({
+          x: columns > 1 ? Math.round(i * (width - side) / (columns - 1)) : 0,
+          y: rows > 1 ? Math.round(j * (height - side) / (rows - 1)) : 0,
+          w: side,
+          h: side,
+        });
+      }
+    }
+  }
+  return tiles;
+}
+
+const peopleCanvas = new OffscreenCanvas(PEOPLE_INPUT, PEOPLE_INPUT);
+const peopleContext = peopleCanvas.getContext('2d', { willReadFrequently: true });
+
+// The person mask of one crop of a video or canvas, PEOPLE_MASK square, one byte a pixel. Null if no answer.
+async function segmentCrop(source, box) {
+  peopleContext.drawImage(source, box.x, box.y, box.w, box.h, 0, 0, PEOPLE_INPUT, PEOPLE_INPUT);
+  const pixels = rgbBase64(peopleContext.getImageData(0, 0, PEOPLE_INPUT, PEOPLE_INPUT).data);
+  const reply = await chrome.runtime.sendMessage({ target: 'offscreen', type: 'people', pixels }).catch(() => null);
+  if (!reply) return null;
+  const mask = new Uint8Array(PEOPLE_MASK * PEOPLE_MASK), text = atob(reply);
+  for (let i = 0; i < mask.length; i++) mask[i] = text.charCodeAt(i);
+  return mask;
+}
+
+// Where the person is in a crop's mask, in the frame's pixels. Null if nobody is.
+function personBox(mask, crop) {
+  let left = PEOPLE_MASK, top = PEOPLE_MASK, right = -1, bottom = -1, count = 0;
+  for (let y = 0; y < PEOPLE_MASK; y++) {
+    for (let x = 0; x < PEOPLE_MASK; x++) {
+      if (mask[y * PEOPLE_MASK + x] < PEOPLE_FULL) continue;
+      count++;
+      if (x < left) left = x;
+      if (x > right) right = x;
+      if (y < top) top = y;
+      if (y > bottom) bottom = y;
+    }
+  }
+  if (count < mask.length * PEOPLE_MIN_SHARE) return null;
+  const scaleX = crop.w / PEOPLE_MASK, scaleY = crop.h / PEOPLE_MASK;
+  return { x: crop.x + left * scaleX, y: crop.y + top * scaleY, w: (right - left + 1) * scaleX, h: (bottom - top + 1) * scaleY };
+}
+
+// The square to look at next, around a person. The segmenter does best with a little room.
+function cropAround(box, width, height) {
+  const short = Math.min(width, height);
+  const side = Math.round(Math.min(short, Math.max(Math.max(box.w, box.h) * PEOPLE_MARGIN, short * PEOPLE_MIN_SIDE)));
+  const clamp = (at, room) => Math.round(Math.max(0, Math.min(room, at)));
+  return { x: clamp(box.x + box.w / 2 - side / 2, width - side), y: clamp(box.y + box.h / 2 - side / 2, height - side), w: side, h: side };
+}
+
+function mergeBoxes(boxes) {
+  const merged = [];
+  for (let box of boxes) {
+    for (let i = merged.length - 1; i >= 0; i--) {
+      const o = merged[i];
+      if (box.x > o.x + o.w || o.x > box.x + box.w || box.y > o.y + o.h || o.y > box.y + box.h) continue;
+      const x = Math.min(box.x, o.x), y = Math.min(box.y, o.y);
+      box = { x, y, w: Math.max(box.x + box.w, o.x + o.w) - x, h: Math.max(box.y + box.h, o.y + o.h) - y };
+      merged.splice(i, 1);
+    }
+    merged.push(box);
+  }
+  return merged.sort((a, b) => b.w * b.h - a.w * a.h).slice(0, PEOPLE_MAX_REGIONS);
+}
+
+// Where people are in a video, as shares of the frame. Empty if there are none.
+async function findPeople(url) {
+  await chrome.runtime.sendMessage({ type: 'open-offscreen' });
+  const boxes = [];
+  let size = null;
+  await countVideoFrames(url, PEOPLE_SCAN_FRAMES, PEOPLE_SCAN_SIZE, async (data, width, height, ctx) => {
+    size = { width, height };
+    for (const tile of peopleTiles(width, height)) {
+      const mask = await segmentCrop(ctx.canvas, tile);
+      const box = mask && personBox(mask, tile);
+      if (box) boxes.push(box);
+    }
+  }, PEOPLE_SCAN_TIMEOUT_MS);
+  if (!size) return [];
+  return mergeBoxes(boxes).map((b) => ({ x: b.x / size.width, y: b.y / size.height, w: b.w / size.width, h: b.h / size.height }));
 }
 
 // A frame from the middle of a video, for the model. Null if the file can't be read.

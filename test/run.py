@@ -103,6 +103,10 @@ clip('vid-late.webm', UI[:4])
 clip('vid-hold.webm', UI[:4])
 clip('vid-gif.webm', UI[1:])
 clip('vid-nocors.webm', UI[:3])
+# A screen recording with a webcam in the corner. test/face.jpg: Neil Armstrong, NASA, public domain.
+FACE = f'{work}/shot-face.png'
+subprocess.run(['ffmpeg', '-v', 'error', '-y', '-i', UI[0], '-i', f'{os.path.dirname(os.path.abspath(__file__))}/face.jpg', '-filter_complex', '[0]scale=640:360,setsar=1[a];[1]scale=150:188[b];[a][b]overlay=480:162', '-frames:v', '1', FACE], check=True)
+clip('vid-face.webm', [FACE, FACE, FACE], '640:360')
 
 # Images a screenshot detector must leave alone, plus a dark UI screenshot.
 MAKE = """async () => {
@@ -626,6 +630,24 @@ with sync_playwright() as p:
         check('model: a saved video verdict stays', 'invert' not in ai_video_filter('no'))
         ai_player('yes', 'vid-ui2.webm')
         check('model: a video darkens on a yes', lambda: 'invert' in ai_video_filter('yes'))
+        # A person keeps their colors, and a video with nobody in it gets nothing on top
+        ai_player('cam', 'vid-face.webm')
+        SHOWN = """() => {
+          const c = document.getElementById('cam').shadowRoot.querySelector('[data-dark-people]');
+          if (!c || !c.width) return null;
+          const d = c.getContext('2d').getImageData(0, 0, c.width, c.height).data, sx = c.width / 640, sy = c.height / 360;
+          let inside = 0, outside = 0;
+          for (let y = 0; y < c.height; y++) for (let x = 0; x < c.width; x++) {
+            if (d[(y * c.width + x) * 4 + 3] < 128) continue;
+            if (x >= 470 * sx && y >= 150 * sy) inside++; else outside++;
+          }
+          return { inside, outside, total: c.width * c.height };
+        }"""
+        check('people: a webcam shows in natural colors', lambda: (vp.evaluate(SHOWN) or {}).get('inside', 0) > 0, vp.evaluate(SHOWN))
+        shown = vp.evaluate(SHOWN) or {}
+        check('people: only the person', shown.get('outside', 1) < shown.get('inside', 0) * 0.1, shown)
+        saved = sw.evaluate("chrome.storage.local.get('videoPeople')").get('videoPeople', {})
+        check('people: a scan of a recording with nobody finds nobody', [] in saved.values() and not vp.evaluate("document.getElementById('yes').shadowRoot.querySelector('[data-dark-people]')"), saved)
         vp.close()
 
     ctx.close()

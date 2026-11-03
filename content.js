@@ -19,10 +19,14 @@
   const NOTHING_SHOWN = 'inset(50%)';
   const PARTS_MIN_HEIGHT = 270;
   const MAX_SAVED_VIDEOS = 500;
+  const PEOPLE_MIN_LOOK_MS = 150;
+  const PEOPLE_HOLD_LOOKS = 3;
 
   let settings = { reader: true, readerMode: 'theme', videos: false, frames: true, uploader: true, tinted: true };
   let overrides = {};
   let savedVideos = {};   // video key -> verdict, so a reload needs no new check
+  let savedPeople = {};   // video key -> where people are in it, as shares of the frame
+  const peopleScans = new Set();
   const systemDark = matchMedia('(prefers-color-scheme: dark)');
 
   // ---------- Reader: darken screenshots already on the page ----------
@@ -30,7 +34,7 @@
   const verdicts = new Map();   // image key -> pixel stats or null, or a promise while checking
   const tracked = new Map();    // img -> { hidden, darkened, filter, held }
   const players = new Map();    // video player -> { hidden, held, timer, expired }
-  const partVideos = new Map(); // video darkened in parts -> { ready, stop }
+  const videoCopies = new Map(); // video with a readable copy on it -> { ready, stop, showPeople }
   const observedRoots = new WeakSet();
   let lastRightClicked = null;
 
@@ -229,11 +233,10 @@
   function setDarkened(img, state, dark, picture = null) {
     if (!dark) picture = null;
     if (state.darkened === dark && state.picture === picture) return;
-    if (state.picture === PARTS) {
-      stopParts(img);
-    } else if (state.picture) {
+    stopCopy(img);
+    if (state.picture && state.picture !== PARTS) {
       img.style.removeProperty('content');
-    } else if (state.darkened) {
+    } else if (state.darkened && !state.picture) {
       img.style.removeProperty('filter');
       if (state.filter) img.style.setProperty('filter', state.filter);
       if (img.localName === 'video') {
@@ -244,7 +247,7 @@
     state.darkened = dark;
     state.picture = picture;
     if (picture === PARTS) {
-      startParts(img);
+      startCopy(img, true);
     } else if (picture) {
       img.style.setProperty('content', `url("${picture}")`, 'important');
     } else if (dark) {
@@ -259,18 +262,119 @@
         img.style.setProperty('background-color', '#fff', 'important');
       }
     }
+    if (dark && img.localName === 'video') keepPeople(img);
+  }
+
+  // The filter or the cut would turn a person into a negative. The first darkening of a
+  // video scans it for people, and most have none, which costs nothing from then on.
+  async function keepPeople(video) {
+    const player = video.getRootNode().host;
+    if (!player || !isPlayer(player) || !playerUrl(player)) return;
+    const key = imageKey(playerUrl(player));
+    if (!savedPeople[key]) {
+      if (peopleScans.has(key)) return;
+      peopleScans.add(key);
+      await new Promise((resolve) => whenOnScreen(video, PARTS_CHECK_MS, resolve));
+      const url = sharpUrl(player, PARTS_MAX_SHARP);
+      const found = url && await withVideoSlot(() => findPeople(url)).catch(() => null);
+      peopleScans.delete(key);
+      if (!found) return;
+      savedPeople[key] = found;
+      const keys = Object.keys(savedPeople);
+      if (keys.length > MAX_SAVED_VIDEOS) delete savedPeople[keys[0]];
+      chrome.storage.local.set({ videoPeople: savedPeople });
+    }
+    const regions = savedPeople[key];
+    if (!regions.length || !video.isConnected || !tracked.get(video)?.darkened) return;
+    await chrome.runtime.sendMessage({ type: 'open-offscreen' }).catch(() => {});
+    if (!videoCopies.has(video)) startCopy(video, false);
+    videoCopies.get(video)?.showPeople(regions);
+  }
+
+  // A canvas over the video that shows the copy's real colors through a person mask. A frame
+  // and the mask of a recent frame go together, so the edges are soft and a little generous.
+  function peopleLayer(copy, regions) {
+    const canvas = document.createElement('canvas');
+    canvas.setAttribute('data-dark-people', '');
+    canvas.setAttribute('aria-hidden', 'true');
+    canvas.style.cssText = 'position:absolute;left:0;top:0;margin:0;max-width:none;max-height:none;pointer-events:none';
+    copy.after(canvas);
+    const ctx = canvas.getContext('2d');
+    const maskCanvas = new OffscreenCanvas(PEOPLE_MASK, PEOPLE_MASK);
+    const maskCtx = maskCanvas.getContext('2d');
+    let looking = false, next = 0, lastLook = 0;
+    let places = [];
+
+    const setUp = () => {
+      canvas.width = copy.videoWidth;
+      canvas.height = copy.videoHeight;
+      places = regions.map((r) => ({
+        crop: cropAround({ x: r.x * canvas.width, y: r.y * canvas.height, w: r.w * canvas.width, h: r.h * canvas.height }, canvas.width, canvas.height),
+        shown: null,
+        at: null,
+        misses: 0,
+      }));
+    };
+
+    const look = async () => {
+      if (looking || copy.readyState < 2 || !copy.videoWidth || performance.now() - lastLook < PEOPLE_MIN_LOOK_MS) return;
+      if (canvas.width !== copy.videoWidth || !places.length) setUp();
+      looking = true;
+      lastLook = performance.now();
+      const place = places[next++ % places.length], crop = place.crop;
+      const mask = await segmentCrop(copy, crop);
+      looking = false;
+      if (!mask) return;
+      const box = personBox(mask, crop);
+      if (!box && ++place.misses <= PEOPLE_HOLD_LOOKS) return;
+      place.misses = 0;
+      if (!box) {
+        place.shown = null;
+        return draw();
+      }
+      const pixels = new ImageData(PEOPLE_MASK, PEOPLE_MASK);
+      for (let i = 0; i < mask.length; i++) pixels.data[i * 4 + 3] = Math.max(0, Math.min(255, (mask[i] - 64) * 3));
+      place.shown?.close();
+      place.shown = await createImageBitmap(pixels);
+      place.at = crop;
+      place.crop = cropAround(box, canvas.width, canvas.height);
+      draw();
+    };
+
+    const draw = () => {
+      if (!canvas.width || copy.readyState < 2) return;
+      ctx.clearRect(0, 0, canvas.width, canvas.height);
+      ctx.globalCompositeOperation = 'source-over';
+      for (const { shown, at } of places) {
+        if (shown) ctx.drawImage(shown, at.x, at.y, at.w, at.h);
+      }
+      ctx.globalCompositeOperation = 'source-in';
+      ctx.drawImage(copy, 0, 0, canvas.width, canvas.height);
+    };
+
+    return {
+      look,
+      draw,
+      clear: () => ctx.clearRect(0, 0, canvas.width, canvas.height),
+      fit: (from) => {
+        for (const name of ['left', 'top', 'width', 'height', 'objectFit', 'borderRadius']) canvas.style[name] = from.style[name];
+      },
+      stop: () => canvas.remove(),
+    };
   }
 
   // A second copy of the video, darkened and cut down to the light parts of its own frames,
   // sits on the real one. Picture and cut come from the same frame, so they stay together
-  // however fast the parts move. It sits under the player's controls.
-  function startParts(video) {
+  // however fast the parts move. It sits under the player's controls. Without `parts` nothing
+  // of it shows: it's there for its readable frames, for the people on top.
+  function startCopy(video, parts) {
     const player = video.getRootNode().host;
     if (!player || !isPlayer(player)) return;
     const box = video.getBoundingClientRect();
     const url = sharpUrl(player, Math.min(box.width, box.height) * devicePixelRatio);
     if (!url) return;
     video.parentNode.querySelector('[data-dark-parts]')?.remove();
+    video.parentNode.querySelector('[data-dark-people]')?.remove();
     const copy = document.createElement('video');
     copy.setAttribute('data-dark-parts', '');
     copy.setAttribute('aria-hidden', 'true');
@@ -281,7 +385,7 @@
     copy.style.cssText = `position:absolute;left:0;top:0;margin:0;max-width:none;max-height:none;pointer-events:none;filter:${DARK_FILTER};clip-path:${NOTHING_SHOWN}`;
     copy.src = url;
     video.after(copy);
-    let ctx = null, stopped = false, frame = 0, seen = -1, lastLook = 0, misses = 0, shown = [], left = 0, top = 0;
+    let ctx = null, stopped = false, frame = 0, seen = -1, lastLook = 0, misses = 0, shown = [], left = 0, top = 0, people = null;
 
     const finish = () => {
       if (state.ready) return;
@@ -298,6 +402,8 @@
       copy.style.height = `${box.height}px`;
       copy.style.objectFit = css.objectFit;
       copy.style.borderRadius = css.borderRadius;
+      people?.fit(copy);
+      if (!ctx) return;
       const fit = css.objectFit === 'cover' ? Math.max : Math.min;
       const scale = fit(box.width / ctx.canvas.width, box.height / ctx.canvas.height);
       const padX = (box.width - ctx.canvas.width * scale) / 2, padY = (box.height - ctx.canvas.height * scale) / 2;
@@ -308,6 +414,12 @@
 
     const look = () => {
       if (stopped || copy.readyState < 2 || copy.seeking || !copy.videoWidth) return;
+      people?.look();
+      if (!parts) {
+        seen = copy.currentTime;
+        lastLook = performance.now();
+        return paint();
+      }
       const scale = Math.min(1, VIDEO_PART_SIZE / Math.max(copy.videoWidth, copy.videoHeight));
       ctx ??= new OffscreenCanvas(Math.round(copy.videoWidth * scale), Math.round(copy.videoHeight * scale)).getContext('2d', { willReadFrequently: true });
       const { width, height } = ctx.canvas;
@@ -327,6 +439,7 @@
     const onFrame = () => {
       if (stopped) return;
       if (performance.now() - lastLook >= PARTS_MIN_LOOK_MS) look();
+      people?.draw();
       frame = copy.requestVideoFrameCallback(onFrame);
     };
 
@@ -338,14 +451,18 @@
       if (Math.abs(behind) > 0.3) copy.currentTime = video.currentTime;
       if (video.paused) {
         copy.pause();
-        if (Math.abs(behind) <= 0.3 && copy.currentTime !== seen) look();
-        else if (ctx) paint();
+        if (Math.abs(behind) <= 0.3 && copy.currentTime !== seen) {
+          look();
+          people?.draw();
+        } else {
+          paint();
+        }
         return;
       }
       // A small nudge catches up without the stall of a seek.
       copy.playbackRate = video.playbackRate * (1 + Math.max(-0.1, Math.min(0.1, behind)));
       if (copy.paused) copy.play().catch(() => {});
-      if (ctx) paint();
+      paint();
     };
 
     const timer = setInterval(tick, PARTS_CHECK_MS);
@@ -353,6 +470,7 @@
     // While it seeks the copy still shows the old frame, which may be nothing like the new one.
     copy.addEventListener('seeking', () => {
       copy.style.clipPath = NOTHING_SHOWN;
+      people?.clear();
     });
     copy.addEventListener('seeked', look);
     // A link can expire, and these files only allow www.reddit.com. Then the video stays as it is.
@@ -367,13 +485,14 @@
       copy.removeAttribute('src');
       copy.load();
       copy.remove();
-      if (partVideos.get(video) === state) partVideos.delete(video);
+      people?.stop();
+      if (videoCopies.get(video) === state) videoCopies.delete(video);
     };
-    const state = { ready: false, stop };
-    partVideos.set(video, state);
+    const state = { ready: !parts, stop, showPeople: (regions) => { people ??= peopleLayer(copy, regions); seen = -1; } };
+    videoCopies.set(video, state);
   }
 
-  const stopParts = (video) => partVideos.get(video)?.stop();
+  const stopCopy = (video) => videoCopies.get(video)?.stop();
 
   // Applies what's known about an image. Returns false if its verdict is still needed.
   function render(img) {
@@ -424,7 +543,7 @@
     const key = imageKey(playerUrl(player));
     const dark = key in overrides ? overrides[key] : readerActive(player) && verdicts.get(key) !== null;
     const video = player.shadowRoot?.querySelector('video');
-    const ready = tracked.get(video)?.darkened && partVideos.get(video)?.ready !== false;
+    const ready = tracked.get(video)?.darkened && videoCopies.get(video)?.ready !== false;
     const hold = dark && !ready && !state.expired;
     setHidden(player, state, hold);
     player.toggleAttribute('data-applying-dark', hold);   // Shows the waiting picture, through content.css.
@@ -575,7 +694,7 @@
   function prune() {
     for (const img of tracked.keys()) {
       if (!img.isConnected) {
-        stopParts(img);
+        stopCopy(img);
         viewport.unobserve(img);
         tracked.delete(img);
       }
@@ -766,6 +885,7 @@
   chrome.storage.onChanged.addListener((changes, area) => {
     if (area !== 'local') return;
     if (changes.videoScreens) savedVideos = changes.videoScreens.newValue || {};
+    if (changes.videoPeople) savedPeople = changes.videoPeople.newValue || {};
     if (!changes.settings && !changes.overrides) return;
     if (changes.settings) settings = { ...settings, ...changes.settings.newValue };
     if (changes.overrides) overrides = changes.overrides.newValue || {};
@@ -774,10 +894,11 @@
 
   // Verdicts from before the model, and what the old AI check left behind, go.
   chrome.storage.local.remove(['videoVerdicts', 'videoChecks', 'aiAnswers']);
-  chrome.storage.local.get(['settings', 'overrides', 'videoScreens']).then((stored) => {
+  chrome.storage.local.get(['settings', 'overrides', 'videoScreens', 'videoPeople']).then((stored) => {
     settings = { ...settings, ...stored.settings };
     overrides = stored.overrides || {};
     savedVideos = stored.videoScreens || {};
+    savedPeople = stored.videoPeople || {};
     for (const [key, verdict] of Object.entries(savedVideos)) verdicts.set(key, verdict || null);
     watchRoot(document);
   });
