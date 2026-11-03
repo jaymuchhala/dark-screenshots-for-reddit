@@ -271,7 +271,7 @@ with sync_playwright() as p:
           return { icon: [...ctx.getImageData(bitmap.width - 34, 14, 20, 20).data].join(), label: [...ctx.getImageData(bitmap.width - 74, 34, 64, 16).data].join(), middle: at(150, 150), edge: at(bitmap.width - 8, 8) };
         }"""
         first = page.evaluate(corner, base64.b64encode(a).decode())
-        check('waiting image: dark box', first['middle'] == [14, 17, 19] and first['edge'] == [14, 17, 19], first['middle'])
+        check('waiting image: no box, the page shows through', first['middle'] == [14, 17, 19] and first['edge'] == [14, 17, 19], first['middle'])
         check('waiting image: icon drawn', first['icon'].count('14,17,19,255') < 400 / 4, first['icon'][:40])
         check('waiting image: label drawn', first['label'].count('14,17,19,255') < 64 * 16)
         page.wait_for_timeout(120)

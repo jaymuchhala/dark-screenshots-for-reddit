@@ -103,8 +103,8 @@
   }
 
   // Where the waiting picture's icon goes, in from the top right corner of what's on show.
-  // An ancestor can clip the box. A narrow bar beside a centered image looks like part of its
-  // dark box, so the top matches the distance to the edge beyond the bar. A wide bar doesn't.
+  // An ancestor can clip the box. A narrow bar beside a centered image looks like part of the
+  // image, so the top matches the distance to the edge beyond the bar. A wide bar doesn't.
   function waitingInsets(el, box) {
     let top = 0, right = 0;
     for (let a = el.parentElement || el.getRootNode().host; a && a !== document.body; a = a.parentElement || a.getRootNode().host) {
@@ -120,7 +120,7 @@
     return { top: Math.round(top + WAITING_INSET + (centered && bar <= WAITING_MAX_BAR ? bar : 0)), right: Math.round(right + WAITING_INSET) };
   }
 
-  // What a waiting image or video shows: a dark box with the icon and "Dark mode..."
+  // What a waiting image or video shows: the icon and "Dark mode..." over an empty box,
   // near its top right corner, the text on one line under the icon, squeezed to its width. Boxes too short for the text
   // get the icon alone. The dots step in time with the sweep: both run for 2s. The delay
   // keeps it from blinking when the wait is very short.
@@ -146,7 +146,6 @@
         ${still ? '' : '<animateTransform attributeName="gradientTransform" type="translate" from="0" to="32" dur="2s" repeatCount="indefinite"/>'}
       </linearGradient>
       <g>
-        <rect width="100%" height="100%" fill="#0e1113"/>
         <svg x="100%" y="${inset.top}" overflow="visible">
           <rect class="icon" x="${-inset.right - 20}" width="20" height="20" rx="4.5" fill="url(#sweep)"/>
           ${label ? `<text x="${-inset.right - 20}" y="27" textLength="20" lengthAdjust="spacingAndGlyphs">Dark mode.<tspan class="second">.</tspan><tspan class="third">.</tspan></text>` : ''}
