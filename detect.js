@@ -1169,12 +1169,15 @@ function naturalMask(data, width, height) {
     if (end - start < n * KEEP_MIN_AREA) return;
     for (let i = start; i < end; i++) keep[queue[i]] = 1;
   });
-  const holes = new Uint8Array(n);
-  for (let i = 0; i < n; i++) holes[i] = keep[i] ? 0 : 1;
-  eachGroup(holes, width, queue, (start, end) => {
-    if (end - start >= n * LIGHT_HOLE) return;
-    for (let i = start; i < end; i++) keep[queue[i]] = 1;
-  });
+  const fillHoles = () => {
+    const holes = new Uint8Array(n);
+    for (let i = 0; i < n; i++) holes[i] = keep[i] ? 0 : 1;
+    eachGroup(holes, width, queue, (start, end) => {
+      if (end - start >= n * LIGHT_HOLE) return;
+      for (let i = start; i < end; i++) keep[queue[i]] = 1;
+    });
+  };
+  fillHoles();
   // Panels and buttons fill their outline. Patches of footage or a photo in a page don't,
   // and keeping those would leave them spotted.
   eachGroup(keep.slice(), width, queue, (start, end) => {
@@ -1189,7 +1192,30 @@ function naturalMask(data, width, height) {
     if ((end - start) / ((right - left + 1) * (bottom - top + 1)) >= KEEP_MIN_FILL) return;
     for (let i = start; i < end; i++) keep[queue[i]] = 0;
   });
-  return shrunk(keep, width);
+  // Thin parts of a kept panel come back, like the strip between a title and the panel's edge,
+  // or the title would count as open to the page. Thin things on their own, like page text, don't.
+  eachGroup(before, width, queue, (start, end) => {
+    let kept = false;
+    for (let i = start; i < end && !kept; i++) kept = keep[queue[i]] === 1;
+    if (!kept) return;
+    for (let i = start; i < end; i++) keep[queue[i]] = 1;
+  });
+  fillHoles();
+  return keep;
+}
+
+// A mask's edge can't be exact: one side of it would show a light line. So inside it the overlay
+// shows as usual, and along it `rim` shows whichever is darker, the plain pixel or the inverted one.
+// Going far past the edge costs nothing on a page, which goes dark anyway, but would shade footage.
+const RIM_INSIDE = 2;
+function maskEdges(mask, width, outside) {
+  let inner = mask, outer = mask;
+  for (let i = 0; i < RIM_INSIDE; i++) inner = shrunk(inner, width);
+  for (let i = 0; i < outside; i++) outer = grown(outer, width);
+  // It carries on under the inner part, since that part's upscaled edge is soft.
+  const under = shrunk(shrunk(inner, width), width), rim = new Uint8Array(mask.length);
+  for (let i = 0; i < rim.length; i++) rim[i] = outer[i] && !under[i] ? 1 : 0;
+  return { inner, rim };
 }
 
 // UI has straight sides, is mostly pale and flat, a color or two, with text or icons on it.

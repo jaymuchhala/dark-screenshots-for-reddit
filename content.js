@@ -421,9 +421,16 @@
     canvas.setAttribute('data-dark-overlay', '');
     canvas.setAttribute('aria-hidden', 'true');
     canvas.style.cssText = `position:absolute;left:0;top:0;margin:0;max-width:none;max-height:none;pointer-events:none${parts ? `;filter:${DARK_FILTER}` : ''}`;
-    video.after(canvas);
-    const ctx = canvas.getContext('2d');
-    let reader = null, shapeCtx = null, shape = null, alpha = null;
+    const rimCanvas = canvas.cloneNode();
+    rimCanvas.removeAttribute('data-dark-overlay');
+    rimCanvas.setAttribute('data-dark-rim', '');
+    rimCanvas.style.mixBlendMode = 'darken';
+    // An edge's blended pixels are mid-gray, and inverting mid-gray changes nothing, so in a darkened
+    // video they'd show as a pale line unless they're dimmed. The inverted page is darker still.
+    if (!parts) rimCanvas.style.filter = 'brightness(0.4)';
+    video.after(rimCanvas, canvas);
+    const ctx = canvas.getContext('2d'), rimCtx = rimCanvas.getContext('2d');
+    let reader = null, shapeCtx = null, rimShapeCtx = null, shape = null, rimShape = null, alpha = null;
     let stopped = false, frame = 0, lastLook = 0, left = 0, top = 0, people = null;
     const state = { ready: false, showPeople: (regions) => { people ??= peopleTracker(video, regions, draw); }, stop: () => stop() };
 
@@ -438,33 +445,43 @@
       // The canvas's containing block isn't known, so it's moved by however far off it is.
       if (Math.abs(box.left - at.left) > 0.5) canvas.style.left = `${left += box.left - at.left}px`;
       if (Math.abs(box.top - at.top) > 0.5) canvas.style.top = `${top += box.top - at.top}px`;
-      canvas.style.width = `${box.width}px`;
-      canvas.style.height = `${box.height}px`;
-      canvas.style.objectFit = css.objectFit;
-      canvas.style.borderRadius = css.borderRadius;
+      for (const each of [canvas, rimCanvas]) {
+        each.style.left = canvas.style.left;
+        each.style.top = canvas.style.top;
+        each.style.width = `${box.width}px`;
+        each.style.height = `${box.height}px`;
+        each.style.objectFit = css.objectFit;
+        each.style.borderRadius = css.borderRadius;
+      }
     };
 
     const look = () => {
       lastLook = performance.now();
       if (canvas.width !== video.videoWidth || canvas.height !== video.videoHeight) {
-        canvas.width = video.videoWidth;
-        canvas.height = video.videoHeight;
+        canvas.width = rimCanvas.width = video.videoWidth;
+        canvas.height = rimCanvas.height = video.videoHeight;
         const scale = Math.min(1, VIDEO_PART_SIZE / Math.max(canvas.width, canvas.height));
         const width = Math.round(canvas.width * scale), height = Math.round(canvas.height * scale);
         reader = new OffscreenCanvas(width, height).getContext('2d', { willReadFrequently: true });
         shapeCtx = new OffscreenCanvas(width, height).getContext('2d');
+        rimShapeCtx = new OffscreenCanvas(width, height).getContext('2d');
         shape = new ImageData(width, height);
+        rimShape = new ImageData(width, height);
         alpha = new Uint8Array(width * height);
       }
       const { width, height } = reader.canvas;
       reader.drawImage(video, 0, 0, width, height);
       const pixels = reader.getImageData(0, 0, width, height).data;
-      const found = parts ? lightMask(pixels, width, height) : naturalMask(pixels, width, height);
+      const { inner, rim } = parts
+        ? maskEdges(lightMask(pixels, width, height), width, 2)
+        : maskEdges(naturalMask(pixels, width, height), width, 4);
       for (let i = 0; i < alpha.length; i++) {
-        alpha[i] = found[i] ? 255 : alpha[i] * MASK_FADE;
+        alpha[i] = inner[i] ? 255 : alpha[i] * MASK_FADE;
         shape.data[i * 4 + 3] = alpha[i];
+        rimShape.data[i * 4 + 3] = rim[i] ? 255 : 0;
       }
       shapeCtx.putImageData(shape, 0, 0);
+      rimShapeCtx.putImageData(rimShape, 0, 0);
       people?.look();
       fit();
     };
@@ -472,16 +489,20 @@
     const draw = () => {
       if (stopped || !shapeCtx || video.readyState < 2) return;
       const { width, height } = canvas;
-      ctx.globalCompositeOperation = 'source-over';
-      ctx.clearRect(0, 0, width, height);
-      ctx.drawImage(shapeCtx.canvas, 0, 0, width, height);
-      if (people) {
-        // A person on a panel isn't part of the panel, and under the video's filter needs keeping.
-        ctx.globalCompositeOperation = parts ? 'destination-out' : 'source-over';
-        people.stamp(ctx);
-      }
-      ctx.globalCompositeOperation = 'source-in';
-      ctx.drawImage(video, 0, 0, width, height);
+      const paint = (to, from, stampMode) => {
+        to.globalCompositeOperation = 'source-over';
+        to.clearRect(0, 0, width, height);
+        to.drawImage(from, 0, 0, width, height);
+        if (people && stampMode) {
+          to.globalCompositeOperation = stampMode;
+          people.stamp(to);
+        }
+        to.globalCompositeOperation = 'source-in';
+        to.drawImage(video, 0, 0, width, height);
+      };
+      // A person on a panel isn't part of the panel, and under the video's filter needs keeping.
+      paint(ctx, shapeCtx.canvas, parts ? 'destination-out' : 'source-over');
+      paint(rimCtx, rimShapeCtx.canvas, parts ? 'destination-out' : null);
     };
 
     const showFrame = () => {
@@ -519,6 +540,7 @@
     const clear = () => {
       alpha?.fill(0);
       ctx.clearRect(0, 0, canvas.width, canvas.height);
+      rimCtx.clearRect(0, 0, canvas.width, canvas.height);
     };
     const resized = new ResizeObserver(fit);
     const listeners = { loadeddata: showFrame, seeked: showFrame, seeking: clear, pause: showStill };
@@ -530,6 +552,7 @@
       resized.disconnect();
       for (const [name, act] of Object.entries(listeners)) video.removeEventListener(name, act);
       canvas.remove();
+      rimCanvas.remove();
       if (overlays.get(video) === state) overlays.delete(video);
       updatePlayer(player);
     };

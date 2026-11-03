@@ -117,7 +117,7 @@ with sync_playwright() as p:
       const seen = c.width ? c.getContext('2d').getImageData(0, 0, c.width, c.height).data : [];
       let shown = 0;
       for (let i = 3; i < seen.length; i += 4) if (seen[i] > 128) shown++;
-      return { shown: shown / (c.width * c.height || 1), filter: c.style.filter, next: c.previousElementSibling.localName, under: c.nextElementSibling.localName };
+      return { shown: shown / (c.width * c.height || 1), filter: c.style.filter, next: c.previousElementSibling.previousElementSibling.localName, rim: c.previousElementSibling.hasAttribute('data-dark-rim') && c.previousElementSibling.style.mixBlendMode, under: c.nextElementSibling.localName };
     }""", id)
     def video(id, expr): return page.evaluate(f"id => {{ const v = document.getElementById(id).shadowRoot.querySelector('video'); return {expr}; }}", id)
     def vfilter(id): return page.evaluate("id => document.getElementById(id).shadowRoot.querySelector('video').style.filter", id)
@@ -144,7 +144,7 @@ with sync_playwright() as p:
     check('footage: checked as neither', any(k.endswith('/plain-96.webm') and v is False for k, v in verdicts.items()), verdicts)
     check('recording: video has no filter', not vfilter('rec'), vfilter('rec'))
     c = cover('rec')
-    check('recording: cover right after the video, under the controls', c and c['next'] == 'video' and c['under'] == 'shreddit-media-ui', c)
+    check('recording: cover right after the video, under the controls', c and c['next'] == 'video' and c['rim'] == 'darken' and c['under'] == 'shreddit-media-ui', c)
     check('recording: the canvas is darkened', 'invert' in c['filter'], c)
     check('recording: no second video', page.evaluate("document.getElementById('rec').shadowRoot.querySelectorAll('video').length") == 1)
     check('recording: reloaded with CORS', video('rec', 'v.crossOrigin') == 'anonymous')
