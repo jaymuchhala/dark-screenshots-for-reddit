@@ -54,7 +54,7 @@ chrome.runtime.onInstalled.addListener(() => {
   chrome.contextMenus.removeAll(() => {
     chrome.contextMenus.create({
       id: 'toggle-dark',
-      title: 'Switch dark mode for this image',
+      title: 'Change dark mode',
       contexts: ['image'],
       documentUrlPatterns: ['https://*.reddit.com/*', 'https://reddit.com/*'],
     });

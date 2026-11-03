@@ -4,7 +4,7 @@ Turns bright screenshots dark on Reddit, such as Chrome Web Store dashboard shot
 
 - **Screenshots you read:** bright UI screenshots on Reddit are shown dark. By default this follows Chrome's light or dark theme, and it can be set to Always. Photos are left alone.
 - **Screenshots you upload:** a bright screenshot chosen, pasted or dropped on Reddit is replaced with a dark copy before Reddit receives it.
-- **Wrong call:** right-click an image and choose "Switch dark mode for this image".
+- **Wrong call:** right-click an image and choose "Change dark mode".
 
 Images are analyzed on your computer. Nothing is sent anywhere.
 
