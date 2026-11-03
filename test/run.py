@@ -593,11 +593,11 @@ with sync_playwright() as p:
 
     if want('ai'):
         # The AI check, on copies of the screenshots so nothing else has a verdict on them.
-        for i in range(1, 16): shutil.copy(f'{site}/shot1.png', f'{site}/ai{i}.png')
+        for i in range(1, 19): shutil.copy(f'{site}/shot1.png', f'{site}/ai{i}.png')
         ALWAYS = "reader:true, readerMode:'always', uploader:true, tinted:true"
         def ai_settings(engine):
             sw.evaluate("e => chrome.storage.local.set({settings:{" + ALWAYS + ", aiEngine:e}}).then(() => { aiPickedAt = 0; })", engine)
-        def ai_rest_over(): sw.evaluate("chrome.storage.session.remove('aiRestUntil')")
+        def ai_rest_over(): sw.evaluate("chrome.storage.session.remove('aiBudget')")
         def ai_filter(pg): return pg.evaluate("document.getElementById('t').style.filter")
         def ai_page(name):
             ai_rest_over()
@@ -614,7 +614,7 @@ with sync_playwright() as p:
         pg = ai_page('ai1.png')
         check('ai: nothing running, the checks decide', lambda: 'invert' in pg.evaluate("document.getElementById('t').style.filter")); pg.close()
 
-        fake_ollama.update(up=True, answer='no', delay=3.5)
+        fake_ollama.update(up=True, answer='no', delay=5)
         ai_settings('auto')
         pg = ai_page('ai2.png')
         pg.wait_for_timeout(3000)
@@ -653,32 +653,49 @@ with sync_playwright() as p:
         pg = ai_page('ai9.png')
         check('ai: not set, it stays off', ai_dark(pg) and (pg.wait_for_timeout(2000) or fake_ollama['asked'] == n)); pg.close()
 
-        # Only while the page is still, only what's on screen, with rests between
+        # In the gaps between scrolls, working ahead of the reader, on a budget
         fake_ollama.update(answer='no', delay=0)
         ai_settings('auto')
         n = fake_ollama['asked']
         pg = ai_page('ai10.png')
-        pg.wait_for_timeout(500)
-        for _ in range(10):
-            pg.evaluate("dispatchEvent(new Event('scroll'))"); pg.wait_for_timeout(300)
+        for _ in range(20):
+            pg.evaluate("dispatchEvent(new Event('scroll'))"); pg.wait_for_timeout(100)
         check('ai: nothing asked while the page moves', fake_ollama['asked'] == n and 'invert' in ai_filter(pg))
-        check('ai: asked once the page is still', lambda: fake_ollama['asked'] == n + 1 and 'invert' not in ai_filter(pg)); pg.close()
+        check('ai: asked in the gap after', lambda: fake_ollama['asked'] == n + 1 and 'invert' not in ai_filter(pg)); pg.close()
 
         n = fake_ollama['asked']
         ai_rest_over()
         pg = ctx.new_page(); pg.goto(base + '/index.html')
         pg.evaluate("() => { const i = new Image(); i.src = '/ai11.png'; i.id = 't'; i.style.cssText = 'display:block;width:300px;height:200px;margin-top:' + (innerHeight + 100) + 'px'; document.body.prepend(i); }")
-        pg.wait_for_timeout(2500)
-        check('ai: an image near the view but off screen waits', fake_ollama['asked'] == n and 'invert' in ai_filter(pg))
-        pg.evaluate("scrollTo(0, innerHeight)")
-        check('ai: asked once on screen', lambda: fake_ollama['asked'] == n + 1); pg.close()
+        check('ai: an image just off screen is settled before it arrives', lambda: fake_ollama['asked'] == n + 1 and 'invert' not in ai_filter(pg)); pg.close()
+
+        # Further off: dark and ready when it arrives, and the model looks once the reader is near
+        n = fake_ollama['asked']
+        ai_rest_over()
+        pg = ctx.new_page(); pg.goto(base + '/index.html')
+        pg.evaluate("() => { const i = new Image(); i.src = '/ai14.png'; i.id = 't'; i.style.cssText = 'display:block;width:300px;height:200px;margin:' + (innerHeight * 3.5) + 'px 0 ' + (innerHeight * 3) + 'px'; document.body.prepend(i); }")
+        check('ai: the pixel check runs screens ahead', lambda: 'invert' in ai_filter(pg))
+        pg.wait_for_timeout(1000)
+        check('ai: the model leaves what is out of reach', fake_ollama['asked'] == n)
+        pg.evaluate("scrollTo(0, innerHeight * 2)")
+        check('ai: scrolling brings it in reach', lambda: fake_ollama['asked'] == n + 1); pg.close()
+
+        # A page's first images go back to back, nearest first
+        fake_ollama.update(answer='yes')
+        n = fake_ollama['asked']
+        ai_rest_over()
+        pg = ctx.new_page(); pg.goto(base + '/index.html')
+        pg.evaluate("() => { for (const [n, gap] of [['ai16', 1.2], ['ai17', 0], ['ai18', 0.2]]) { const i = new Image(); i.src = '/' + n + '.png'; i.id = n; i.style.cssText = 'display:block;width:300px;height:200px;margin-top:' + gap * innerHeight + 'px'; document.body.append(i); } }")
+        check('ai: a burst at page load, no rests between', lambda: fake_ollama['asked'] == n + 3)
+        pg.close()
+        fake_ollama.update(answer='no')
 
         n = fake_ollama['asked']
-        sw.evaluate("chrome.storage.session.set({aiRestUntil: Date.now() + 3500})")
+        sw.evaluate("chrome.storage.session.set({aiBudget: {ms: 0, at: Date.now(), call: 600}})")
         pg = ctx.new_page(); pg.goto(base + '/index.html')
         pg.evaluate("() => { const i = new Image(); i.src = '/ai12.png'; i.id = 't'; i.style.cssText = 'width:300px;height:200px'; document.body.prepend(i); }")
         pg.wait_for_timeout(2500)
-        check('ai: the model rests between calls', fake_ollama['asked'] == n)
+        check('ai: with the budget spent, the model rests', fake_ollama['asked'] == n)
         check('ai: asked after the rest', lambda: fake_ollama['asked'] == n + 1); pg.close()
 
         fake_ollama.update(delay=2)
@@ -686,9 +703,9 @@ with sync_playwright() as p:
         pg = ai_page('ai13.png')
         until(lambda: fake_ollama['asked'] == n + 1, 8000)
         pg.evaluate("dispatchEvent(new Event('scroll'))")
-        pg.wait_for_timeout(2500)
+        pg.wait_for_timeout(500)
         check('ai: moving drops the running call', 'invert' in ai_filter(pg) and 'ai13' not in str(sw.evaluate("chrome.storage.local.get('aiAnswers')")))
-        check('ai: a rest follows it', sw.evaluate("chrome.storage.session.get('aiRestUntil')").get('aiRestUntil', 0) > 0)
+        check('ai: it still costs budget', lambda: sw.evaluate("chrome.storage.session.get('aiBudget')").get('aiBudget', {}).get('ms', 99999) < 24000)
         fake_ollama.update(delay=0)
         ai_rest_over()
         check('ai: asked again once still', lambda: fake_ollama['asked'] == n + 2 and 'invert' not in ai_filter(pg)); pg.close()

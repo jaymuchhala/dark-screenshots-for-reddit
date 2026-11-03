@@ -9,7 +9,15 @@
   const MAX_VIDEO_CHECKS = 2;
   const PLAYER_TRIES = 100, PLAYER_RETRY_MS = 100;
   const VIDEO_REVEAL_AFTER_MS = 6000;
-  const AI_STILL_MS = 1500;     // how long the page has to be still before the AI check runs
+  const AHEAD_SCREENS = 4;       // how far past the screen images get checked, so they're dark when they arrive
+  const AI_STILL_MS = 300;       // a gap this long between scrolls is enough to start the AI check
+  const AI_STILL_MAX_MS = 2400;
+  const AI_REACH_MIN_SCREENS = 2;
+  const AI_AHEAD_CALLS = 4;
+  const AI_BEHIND_COST = 3;
+  const AI_CALL_GUESS_MS = 4000;
+  const AI_TRAVEL_HALF_LIFE_MS = 10000;
+  const VETO_FADE_MS = 300;
   const AI_UPLOAD_WAIT_MS = 30000;
   const PARTS = 'parts';
   const PARTS_CHECK_MS = 100;
@@ -28,7 +36,7 @@
   // ---------- Reader: darken screenshots already on the page ----------
 
   const verdicts = new Map();   // image key -> pixel stats or null, or a promise while checking
-  const aiWaiting = new Map();  // image key -> { ask, veto } for the AI check, once the page is still
+  const aiWaiting = new Map();  // image key -> { ask, veto } for the AI check
   const tracked = new Map();    // img -> { hidden, darkened, filter, held }
   const players = new Map();    // video player -> { hidden, held, timer, expired }
   const partVideos = new Map(); // video darkened in parts -> { ready, stop }
@@ -463,16 +471,16 @@
     for (const player of players.keys()) updatePlayer(player);
   }
 
-  // ---------- The AI check, which can undo a darkening once the page is still ----------
+  // ---------- The AI check, which can undo a darkening before it's seen ----------
 
   // The model fills the GPU that also scrolls the page, so nothing waits on it: the pixel checks'
-  // verdict shows at once, and the model only looks at what's on screen after the page has been
-  // still for a while. Any movement stops it. A saved answer applies straight away.
+  // verdict shows at once, and the model works ahead on what's about to be seen, in the gaps
+  // between scrolls. Any movement stops it. A saved answer applies straight away.
   function imageVerdict(key, stats, url) {
     if (!stats || key in overrides) return stats;
     const veto = () => ({ ...stats, photo: 1, partial: null, vetoedPartial: stats.partial });
     if (stats.ai === false) return veto();
-    if (stats.ai === 'ask') askWhenStill(key, () => askAi({ key, url }), veto);
+    if (stats.ai === 'ask') askSoon(key, () => askAi({ key, url }), veto);
     return stats;
   }
 
@@ -482,7 +490,7 @@
     if (pixels !== null && !(key in savedVideos)) saveVideoVerdict(key, pixels);
     if (pixels !== true) return pixels;
     const known = await chrome.runtime.sendMessage({ type: 'ai-known', key }).catch(() => null);
-    if (known === 'ask') askWhenStill(key, () => askAboutVideo(key, player), () => null);
+    if (known === 'ask') askSoon(key, () => askAboutVideo(key, player), () => null);
     return known !== false;
   }
 
@@ -499,10 +507,13 @@
   let aiTimer = null;
   let aiAsking = false;
   let aiMoves = 0;
+  let aiStillMs = AI_STILL_MS;
+  let aiCallMs = AI_CALL_GUESS_MS;
+  let travel = 0, travelAt = 0, lastY = scrollY, scrollDirection = 1;
 
-  function askWhenStill(key, ask, veto) {
+  function askSoon(key, ask, veto) {
     aiWaiting.set(key, { ask, veto });
-    if (!aiTimer && !aiAsking) askLater(AI_STILL_MS);
+    if (!aiTimer && !aiAsking) askLater(aiStillMs);
   }
 
   function askLater(ms) {
@@ -510,40 +521,98 @@
     aiTimer = aiWaiting.size ? setTimeout(askNext, ms) : null;
   }
 
-  function aiKeyOnScreen() {
+  // Distance scrolled lately, fading by half every AI_TRAVEL_HALF_LIFE_MS.
+  const travelNow = (now) => travel * 0.5 ** ((now - travelAt) / AI_TRAVEL_HALF_LIFE_MS);
+
+  // How far past the screen to look: as far as the reader gets in the time the model takes
+  // over its next few images. A faster reader or a slower model reaches further.
+  function aiReach() {
+    const pxPerMs = travelNow(Date.now()) * Math.LN2 / AI_TRAVEL_HALF_LIFE_MS;
+    return Math.min(AHEAD_SCREENS, Math.max(AI_REACH_MIN_SCREENS, pxPerMs * aiCallMs * AI_AHEAD_CALLS / innerHeight)) * innerHeight;
+  }
+
+  // The nearest waiting image in reach. What's behind the reader counts as further away.
+  function aiNextKey() {
+    const reach = aiReach();
+    let next = null, nearest = Infinity;
     for (const el of [...tracked.keys(), ...players.keys()]) {
       if (!el.isConnected) continue;
-      const box = el.getBoundingClientRect();
-      if (!box.width || box.bottom < 0 || box.top > innerHeight) continue;
       const url = el.localName === 'img' || el.localName === 'video' ? imageUrl(el) : playerUrl(el);
       const key = url && imageKey(url);
-      if (aiWaiting.has(key)) return key;
+      if (!aiWaiting.has(key)) continue;
+      const box = el.getBoundingClientRect();
+      if (!box.width) continue;
+      const below = box.top - innerHeight, above = -box.bottom;
+      const behind = (below > 0 && scrollDirection < 0) || (above > 0 && scrollDirection > 0);
+      const distance = Math.max(0, below, above) * (behind ? AI_BEHIND_COST : 1);
+      if (distance <= reach && distance < nearest) {
+        next = key;
+        nearest = distance;
+      }
     }
-    return null;
+    return next;
   }
 
   async function askNext() {
     aiTimer = null;
     if (aiAsking || document.hidden || !chrome.runtime?.id) return;
-    const key = aiKeyOnScreen();
+    const key = aiNextKey();
     if (!key) return;
     const job = aiWaiting.get(key);
     aiAsking = true;
+    const started = Date.now();
     const said = await job.ask();
     aiAsking = false;
     if (said?.restMs) return askLater(said.restMs);
-    if (said !== 'cancelled') aiWaiting.delete(key);
-    if (said === false) settleVerdict(key, job.veto());
-    askLater(AI_STILL_MS);
+    if (said !== 'cancelled') {
+      aiWaiting.delete(key);
+      aiStillMs = AI_STILL_MS;
+    }
+    if (typeof said === 'boolean') aiCallMs = Date.now() - started;
+    if (said === false) {
+      fadeOnce(key);
+      settleVerdict(key, job.veto());
+    }
+    askLater(aiStillMs);
   }
 
+  // An answer that comes while the image is on show changes it softly.
+  function fadeOnce(key) {
+    for (const img of tracked.keys()) {
+      if (img.localName !== 'img' || imageKey(imageUrl(img)) !== key) continue;
+      img.style.setProperty('transition', `filter ${VETO_FADE_MS}ms`);
+      setTimeout(() => img.style.removeProperty('transition'), VETO_FADE_MS);
+    }
+  }
+
+  // A stopped call is wasted work, so someone who keeps scrolling gets a longer wait each time.
   function pageMoved() {
     aiMoves++;
-    if (aiAsking) chrome.runtime.sendMessage({ type: 'ai-cancel' }).catch(() => {});
-    askLater(AI_STILL_MS);
+    const now = Date.now(), moved = scrollY - lastY;
+    if (moved) {
+      travel = travelNow(now) + Math.abs(moved);
+      travelAt = now;
+      scrollDirection = Math.sign(moved);
+      lastY = scrollY;
+    }
+    if (aiAsking) {
+      aiStillMs = Math.min(AI_STILL_MAX_MS, aiStillMs * 2);
+      chrome.runtime.sendMessage({ type: 'ai-cancel' }).catch(() => {});
+    }
+    askLater(aiStillMs);
   }
   for (const type of ['scroll', 'wheel', 'keydown']) window.addEventListener(type, pageMoved, { capture: true, passive: true });
   document.addEventListener('visibilitychange', pageMoved);
+
+  // Off screen nothing shows, so a check that's still going keeps its hold until it can be seen.
+  function whenOnScreen(el, ms, act) {
+    setTimeout(() => {
+      if (!el.isConnected) return;
+      const box = el.getBoundingClientRect();
+      if (box.bottom > 0 && box.top < innerHeight) act();
+      else whenOnScreen(el, ms, act);
+    }, ms);
+  }
 
   function saveVideoVerdict(key, verdict) {
     savedVideos[key] = verdict;
@@ -560,10 +629,10 @@
         if (!held.hidden) continue;
         if (!held.timer) {
           held.timer = true;
-          setTimeout(() => {
+          whenOnScreen(img, VIDEO_REVEAL_AFTER_MS, () => {
             held.expired = true;
             updatePlayer(img);
-          }, VIDEO_REVEAL_AFTER_MS);
+          });
         }
         if (readerActive(img)) checkVerdict(img, playerUrl(img));
         continue;
@@ -580,10 +649,10 @@
         if (url && img.localName === 'img' && overrides[imageKey(url)] && chrome.runtime?.id) checkVerdict(img, url);
         continue;
       }
-      setTimeout(() => setHidden(img, state, false), img.localName === 'video' ? VIDEO_REVEAL_AFTER_MS : REVEAL_AFTER_MS);
+      whenOnScreen(img, img.localName === 'video' ? VIDEO_REVEAL_AFTER_MS : REVEAL_AFTER_MS, () => setHidden(img, state, false));
       checkVerdict(img, url);
     }
-  }, { rootMargin: '600px' });
+  }, { rootMargin: `${AHEAD_SCREENS * 100}% 0px` });
 
   // Reddit can restore a feed from a saved copy of its markup, and an image can be
   // dropped from `tracked` and put back, so an image can arrive with these styles

@@ -3,8 +3,9 @@ importScripts('detect.js');
 const IMAGE_HOSTS = new Set(['i.redd.it', 'preview.redd.it', 'external-preview.redd.it']);
 const MAX_FETCHES = 4;
 const AI_TIMEOUT_MS = 30000;
-const AI_REST_FACTOR = 6;      // after each call the model rests 6 times as long, so it's busy 1/7 of the time at most
-const AI_REST_MIN_MS = 3000;
+const AI_BURST_MS = 24000;     // model time in hand: enough for a page's first images, back to back
+const AI_REFILL = 1 / 6;       // model time earned per ms, so over a long stretch it's busy 1/7 of the time at most
+const AI_CALL_GUESS_MS = 4000;
 const AI_REST_MAX_MS = 90000;
 const AI_PICK_MS = 30000;      // how long to trust which engine is ready
 const AI_VERSION = 1;          // raise when the prompt changes, so old answers go
@@ -150,9 +151,25 @@ function cancelAi(tab) {
   toOffscreen({ type: 'ai-cancel' }).catch(() => {});
 }
 
+// Model time goes on a budget, not a rest after every call: a page can use a burst of it, and
+// heat only comes from keeping it up. Kept for all tabs, and past the worker going idle.
+async function aiBudget() {
+  const now = Date.now();
+  const { aiBudget: saved } = await chrome.storage.session.get('aiBudget');
+  if (!saved) return { ms: AI_BURST_MS, at: now, call: AI_CALL_GUESS_MS };
+  return { ...saved, ms: Math.min(AI_BURST_MS, saved.ms + (now - saved.at) * AI_REFILL), at: now };
+}
+
+async function spendAiBudget(spent, cancelled) {
+  const budget = await aiBudget();
+  budget.ms = Math.max(-AI_REST_MAX_MS * AI_REFILL, budget.ms - spent);
+  if (!cancelled) budget.call = spent;
+  await chrome.storage.session.set({ aiBudget: budget });
+}
+
 // True if the image is a screen, false if not, null if there's no answer, 'cancelled' if the
 // page moved, or { restMs } if the model is resting. An image comes as a data URL, or as a url
-// to fetch. Images on the page have a key and wait out the rest; an upload is someone waiting.
+// to fetch. Images on the page have a key and keep to the budget; an upload is someone waiting.
 function askAi({ key, url, image }, tab) {
   return new Promise((resolve) => {
     const job = { tab: key ? tab : null, resolve, cancelled: false };
@@ -165,15 +182,15 @@ function askAi({ key, url, image }, tab) {
         const pick = await aiPick();
         if (!pick) return resolve(null);
         if (key) {
-          const { aiRestUntil = 0 } = await chrome.storage.session.get('aiRestUntil');
-          if (aiRestUntil > Date.now()) return resolve({ restMs: aiRestUntil - Date.now() });
+          const { ms, call } = await aiBudget();
+          const needed = Math.min(call, AI_BURST_MS / 4);
+          if (ms < needed) return resolve({ restMs: Math.min(AI_REST_MAX_MS, (needed - ms) / AI_REFILL) });
         }
         if (url && !allowedImage(url)) return resolve(null);
         const sent = image || await aiImage(await (await fetch(url, { credentials: 'omit' })).blob());
         const started = Date.now();
         const screen = await toOffscreen({ type: 'ai-ask', pick, image: sent, timeoutMs: AI_TIMEOUT_MS });
-        const restMs = Math.max(AI_REST_MIN_MS, Math.min(AI_REST_MAX_MS, (Date.now() - started) * AI_REST_FACTOR));
-        await chrome.storage.session.set({ aiRestUntil: Date.now() + restMs });
+        await spendAiBudget(Date.now() - started, job.cancelled);
         if (screen === null) { if (!job.cancelled) aiPickedAt = 0; }
         else if (key) {
           answers[key] = screen;
