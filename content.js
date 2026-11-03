@@ -11,6 +11,10 @@
   const VIDEO_REVEAL_AFTER_MS = 6000;
   const PARTS = 'parts';
   const PARTS_CHECK_MS = 100;
+  const PARTS_MIN_LOOK_MS = 66;
+  const PARTS_HOLD_LOOKS = 2;
+  const PARTS_MAX_SHARP = 540;
+  const NOTHING_SHOWN = 'inset(50%)';
   const PARTS_MIN_HEIGHT = 270;
   const MAX_SAVED_VIDEOS = 500;
 
@@ -49,6 +53,18 @@
   const playerUrl = (player) => player.getAttribute('preview') || (player.hasAttribute('gif') && player.getAttribute('src')) || null;
 
   const isPlayer = (el) => el.localName === 'shreddit-player' || el.localName === 'shreddit-player-2';
+
+  // The copy shown over the video has to look as sharp as the video does there.
+  function sharpUrl(player, need) {
+    try {
+      const sources = JSON.parse(player.getAttribute('packaged-media-json')).playbackMp4s.permutations.map((p) => p.source);
+      const side = (s) => Math.min(s.dimensions.width, s.dimensions.height);
+      sources.sort((a, b) => side(a) - side(b));
+      return (sources.find((s) => side(s) >= Math.min(PARTS_MAX_SHARP, need)) || sources.at(-1))?.url || null;
+    } catch {
+      return null;
+    }
+  }
 
   // The preview is too small to find the edges of a panel. The player's own <video> can't
   // be read, but the same files load fine with CORS.
@@ -243,25 +259,27 @@
     }
   }
 
-  // A filter on an element over the video darkens what's behind it, so only the light
-  // parts turn dark and the footage stays. It sits under the player's controls. What it
-  // covers comes from a hidden copy of the video, played along with the real one.
+  // A second copy of the video, darkened and cut down to the light parts of its own frames,
+  // sits on the real one. Picture and cut come from the same frame, so they stay together
+  // however fast the parts move. It sits under the player's controls.
   function startParts(video) {
     const player = video.getRootNode().host;
     if (!player || !isPlayer(player)) return;
-    const url = largerUrl(player);
+    const box = video.getBoundingClientRect();
+    const url = sharpUrl(player, Math.min(box.width, box.height) * devicePixelRatio);
     if (!url) return;
     video.parentNode.querySelector('[data-dark-parts]')?.remove();
-    const cover = document.createElement('div');
-    cover.setAttribute('data-dark-parts', '');
-    cover.style.cssText = `position:absolute;left:0;top:0;pointer-events:none;display:none;backdrop-filter:${DARK_FILTER}`;
-    video.after(cover);
     const copy = document.createElement('video');
+    copy.setAttribute('data-dark-parts', '');
+    copy.setAttribute('aria-hidden', 'true');
     copy.crossOrigin = 'anonymous';
     copy.muted = true;
+    copy.playsInline = true;
     copy.preload = 'auto';
+    copy.style.cssText = `position:absolute;left:0;top:0;margin:0;max-width:none;max-height:none;pointer-events:none;filter:${DARK_FILTER};clip-path:${NOTHING_SHOWN}`;
     copy.src = url;
-    let ctx = null, regions = [], checked = false, left = 0, top = 0;
+    video.after(copy);
+    let ctx = null, stopped = false, frame = 0, seen = -1, lastLook = 0, misses = 0, shown = [], left = 0, top = 0;
 
     const finish = () => {
       if (state.ready) return;
@@ -270,35 +288,47 @@
     };
 
     const paint = () => {
-      const box = video.getBoundingClientRect(), at = cover.getBoundingClientRect();
-      // The cover's containing block isn't known, so it's moved by however far off it is.
-      if (Math.abs(box.left - at.left) > 0.5) left += box.left - at.left;
-      if (Math.abs(box.top - at.top) > 0.5) top += box.top - at.top;
-      const shown = regions.filter((r) => r.seen >= 2);
-      const scale = Math.min(box.width / ctx.canvas.width, box.height / ctx.canvas.height);
+      const box = video.getBoundingClientRect(), at = copy.getBoundingClientRect(), css = getComputedStyle(video);
+      // The copy's containing block isn't known, so it's moved by however far off it is.
+      if (Math.abs(box.left - at.left) > 0.5) copy.style.left = `${left += box.left - at.left}px`;
+      if (Math.abs(box.top - at.top) > 0.5) copy.style.top = `${top += box.top - at.top}px`;
+      copy.style.width = `${box.width}px`;
+      copy.style.height = `${box.height}px`;
+      copy.style.objectFit = css.objectFit;
+      copy.style.borderRadius = css.borderRadius;
+      const fit = css.objectFit === 'cover' ? Math.max : Math.min;
+      const scale = fit(box.width / ctx.canvas.width, box.height / ctx.canvas.height);
       const padX = (box.width - ctx.canvas.width * scale) / 2, padY = (box.height - ctx.canvas.height * scale) / 2;
-      // Clockwise boxes and counter-clockwise holes, so boxes that touch don't cancel out.
-      const path = shown.map((r) => {
-        const x = padX + r.x * scale - 1, y = padY + r.y * scale - 1, w = r.w * scale + 2, h = r.h * scale + 2;
-        return `M${x} ${y}h${w}v${h}h${-w}z` + r.holes.map((hole) =>
-          `M${padX + hole.x * scale} ${padY + hole.y * scale}v${hole.h * scale}h${hole.w * scale}v${-hole.h * scale}z`).join('');
-      }).join('');
-      cover.style.cssText = `position:absolute;left:${left}px;top:${top}px;width:${box.width}px;height:${box.height}px;` +
-        `pointer-events:none;display:${path ? 'block' : 'none'};backdrop-filter:${DARK_FILTER};clip-path:path("${path}")`;
+      // Rows of the same width share a box, and they overlap a little so no line shows between them.
+      const path = shown.map((r) => `M${padX + r.x * scale - 0.5} ${padY + r.y * scale - 0.5}h${r.w * scale + 1}v${r.h * scale + 1}h${-r.w * scale - 1}z`).join('');
+      copy.style.clipPath = path ? `path("${path}")` : NOTHING_SHOWN;
     };
 
     const look = () => {
-      if (copy.readyState < 2 || copy.seeking || !copy.videoWidth) return;
+      if (stopped || copy.readyState < 2 || copy.seeking || !copy.videoWidth) return;
       const scale = Math.min(1, VIDEO_PART_SIZE / Math.max(copy.videoWidth, copy.videoHeight));
       ctx ??= new OffscreenCanvas(Math.round(copy.videoWidth * scale), Math.round(copy.videoHeight * scale)).getContext('2d', { willReadFrequently: true });
       const { width, height } = ctx.canvas;
       ctx.drawImage(copy, 0, 0, width, height);
-      regions = steadyRegions(regions, lightRegions(ctx.getImageData(0, 0, width, height).data, width, height), !checked);
-      checked = true;
+      seen = copy.currentTime;
+      lastLook = performance.now();
+      const rects = lightMask(ctx.getImageData(0, 0, width, height).data, width, height);
+      // A frame or two can miss the parts as they move, and that shouldn't flash light.
+      if (rects.length || ++misses > PARTS_HOLD_LOOKS) {
+        shown = rects;
+        misses = 0;
+      }
       paint();
       finish();
     };
 
+    const onFrame = () => {
+      if (stopped) return;
+      if (performance.now() - lastLook >= PARTS_MIN_LOOK_MS) look();
+      frame = copy.requestVideoFrameCallback(onFrame);
+    };
+
+    // Keeps the copy on the real video's time. Only runs the frame checks while paused.
     const tick = () => {
       const box = video.getBoundingClientRect();
       if (document.hidden || box.bottom < 0 || box.top > innerHeight) return copy.pause();
@@ -306,16 +336,22 @@
       if (Math.abs(behind) > 0.3) copy.currentTime = video.currentTime;
       if (video.paused) {
         copy.pause();
-        if (Math.abs(behind) <= 0.3) look();
+        if (Math.abs(behind) <= 0.3 && copy.currentTime !== seen) look();
+        else if (ctx) paint();
         return;
       }
       // A small nudge catches up without the stall of a seek.
       copy.playbackRate = video.playbackRate * (1 + Math.max(-0.1, Math.min(0.1, behind)));
       if (copy.paused) copy.play().catch(() => {});
-      look();
+      if (ctx) paint();
     };
 
     const timer = setInterval(tick, PARTS_CHECK_MS);
+    frame = copy.requestVideoFrameCallback(onFrame);
+    // While it seeks the copy still shows the old frame, which may be nothing like the new one.
+    copy.addEventListener('seeking', () => {
+      copy.style.clipPath = NOTHING_SHOWN;
+    });
     copy.addEventListener('seeked', look);
     // A link can expire, and these files only allow www.reddit.com. Then the video stays as it is.
     copy.addEventListener('error', () => {
@@ -323,10 +359,12 @@
       finish();
     });
     const stop = () => {
+      stopped = true;
       clearInterval(timer);
+      copy.cancelVideoFrameCallback(frame);
       copy.removeAttribute('src');
       copy.load();
-      cover.remove();
+      copy.remove();
       if (partVideos.get(video) === state) partVideos.delete(video);
     };
     const state = { ready: false, stop };
@@ -482,7 +520,7 @@
     updatePlayer(img.getRootNode().host);
   }
 
-  const isMedia = (el) => el.localName === 'img' || el.localName === 'video';
+  const isMedia = (el) => el.localName === 'img' || (el.localName === 'video' && !el.hasAttribute('data-dark-parts'));
 
   // The player's scripts load late, so a shadow root may not exist yet.
   function watchLate(el, tries = PLAYER_TRIES) {
