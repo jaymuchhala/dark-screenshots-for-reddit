@@ -102,6 +102,7 @@ MAKE = """async () => {
     ...[['partial-photos.png', true], ['partial-strict.png', false], ['partial-cream.png', false, '#feecdc']].map(([name, photos, page]) => mk(name, 1200, 800, (x,w,h)=>{ x.fillStyle=page||'#fff'; x.fillRect(0,0,w,h); x.fillStyle='#222'; x.font='18px sans-serif'; for(let i=0;i<26;i++) x.fillText('Lorem ipsum dolor sit amet, consectetur adipiscing elit',30,430+i*14+(i%2)); if(photos){ noise(x,30,30,400,330,[150,130,110]); noise(x,460,30,400,330,[120,140,150]); } x.fillStyle='#14202e'; x.fillRect(900,60,270,photos?360:300); x.fillStyle='#eee'; for(let i=0;i<9;i++) x.fillText('Panel row '+i,920,100+i*30); })),
     mk('frame-dark.png', 1200, 800, (x,w,h)=>{ x.fillStyle='#ecece4'; x.fillRect(0,0,w,h); x.fillStyle='#333'; x.font='18px sans-serif'; x.fillText('IMAGE 01',50,30); x.fillStyle='#111'; x.fillRect(50,45,1100,330); x.fillStyle='#333'; x.fillText('IMAGE 02',50,405); x.fillStyle='#111'; x.fillRect(50,420,1100,340); x.fillStyle='#ddd'; x.fillText('Dark panel text',100,120); }),
     mk('neg-caption-bars.png', 1200, 800, (x,w,h)=>{ x.fillStyle='#fff'; x.fillRect(0,0,w,h); x.fillStyle='#111'; x.fillRect(0,110,w,580); x.font='40px sans-serif'; x.fillText('top text',60,70); x.fillText('bottom text',60,760); }),
+    mk('partial-lines.png', 1200, 800, (x,w,h)=>{ x.fillStyle='#fff'; x.fillRect(0,0,w,h); x.fillStyle='#222'; x.font='18px sans-serif'; for(let i=0;i<26;i++) x.fillText('Lorem ipsum dolor sit amet, consectetur adipiscing elit',30,430+i*14+(i%2)); noise(x,30,30,400,330,[150,130,110]); noise(x,460,30,400,330,[120,140,150]); x.fillStyle='#14202e'; x.fillRect(900,60,270,360); x.strokeStyle='#888'; x.lineWidth=2; x.strokeRect(10,10,1180,780); for(const y of [20,200,395]){ x.beginPath(); x.moveTo(10,y); x.lineTo(1190,y); x.stroke(); } }),
     mk('pos-text-ui.png', 900, 500, (x,w,h)=>{ x.fillStyle='#fff'; x.fillRect(0,0,w,h); x.fillStyle='#222'; x.font='18px sans-serif'; for(let i=0;i<20;i++) x.fillText('Lorem ipsum dolor sit amet, consectetur adipiscing elit, sed do eiusmod tempor',20,26+i*24); }),
   ]);
 }"""
@@ -148,7 +149,7 @@ with sync_playwright() as p:
         }""", [shot, x, y])
     # Partly dark: the page goes dark, panels and photos keep their colors. The box is
     # 300x200 with object-fit: contain, and these images are 3:2 too, so points line up.
-    for f in ('partial-photos.png', 'partial-strict.png'):
+    for f in ('partial-photos.png', 'partial-strict.png', 'partial-lines.png'):
         el = page.locator(f'img[alt="{f}"]')
         check(f'{f}: partly dark, no filter', 'url("data:image/webp' in el.evaluate("el => el.style.content") and not el.evaluate(FILTERED))
         el.scroll_into_view_if_needed()
@@ -182,6 +183,7 @@ with sync_playwright() as p:
     check('re-attached: not hidden', page.locator('#saved').evaluate("el => el.style.visibility") == '')
     shutil.copy(f'{site}/shot2.png', f'{site}/slow.png')
     page.evaluate("""() => { const b=document.createElement('div'); b.id='box'; b.style.cssText='height:20px'; const i=new Image(); i.id='late'; i.style.cssText='width:300px;height:100%'; b.append(i); document.body.append(b); i.src='/slow.png'; i.addEventListener('load', () => { b.style.height='200px'; }, {once:true}); }""")
+    page.locator('#box').evaluate('el => el.scrollIntoView()')
     page.wait_for_timeout(1500)
     check('sized after load: not hidden', page.locator('#late').evaluate("el => el.style.visibility") == '')
     check('sized after load: darkened', 'invert' in page.locator('#late').evaluate(FILTERED))

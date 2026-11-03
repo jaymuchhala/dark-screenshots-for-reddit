@@ -110,6 +110,7 @@ async function analyzeBlob(blob) {
 // pale but not flat enough to pass, or passing but with a lot of dark in them.
 const PARTIAL_SIZE = 1600;
 const PARTIAL_MIN_LIGHT = 0.45;
+const PARTIAL_THIN_LINE = 2;
 
 function mayBePartial(stats) {
   if (stats.tinted < PARTIAL_MIN_LIGHT || stats.colorful > 0.25) return false;
@@ -205,17 +206,20 @@ function pageMask(data, width, height) {
   });
   if (!page) return null;
   // Big things on the page stay as they are. Small things, like text, get darkened.
-  const mask = new Uint8Array(n).fill(1);
-  let kept = 0;
-  eachGroup(other, width, queue, (start, end) => {
+  // Thin lines come off first, since a border or divider can join everything on the
+  // page into one big thing.
+  let solid = other;
+  for (let i = 0; i < PARTIAL_THIN_LINE; i++) solid = shrunk(solid, width);
+  let keep = new Uint8Array(n);
+  const boxes = [];
+  eachGroup(solid, width, queue, (start, end) => {
     if (end - start < n * 0.004) return;
-    kept += end - start;
     // A white ceiling in a photo can run into a white page and bite into the group, so
     // a big group is squared off along the rows and columns it mostly fills.
     const rows = new Map(), cols = new Map();
     for (let i = start; i < end; i++) {
       const c = queue[i], x = c % width, y = (c - x) / width;
-      mask[c] = 0;
+      keep[c] = 1;
       rows.set(y, (rows.get(y) || 0) + 1);
       cols.set(x, (cols.get(x) || 0) + 1);
     }
@@ -225,12 +229,22 @@ function pageMask(data, width, height) {
     const fullX = xs.filter((x) => cols.get(x) >= boxH * 0.6), fullY = ys.filter((y) => rows.get(y) >= boxW * 0.6);
     if (!fullX.length || !fullY.length) return;
     const x0 = Math.min(...fullX), x1 = Math.max(...fullX), y0 = Math.min(...fullY), y1 = Math.max(...fullY);
-    for (let y = y0; y <= y1; y++) mask.fill(0, y * width + x0, y * width + x1 + 1);
+    // Anything less than mostly filled is several things still joined up, not one photo.
+    if (end - start >= (x1 - x0 + 1) * (y1 - y0 + 1) * 0.6) boxes.push([x0, y0, x1, y1]);
   });
-  let share = 0;
+  for (let i = 0; i < PARTIAL_THIN_LINE; i++) keep = grown(keep, width);
+  const mask = new Uint8Array(n);
+  let share = 0, ink = 0;
+  for (let i = 0; i < n; i++) {
+    if (other[i] && !keep[i]) ink++;
+    mask[i] = other[i] && keep[i] ? 0 : 1;
+  }
+  for (const [x0, y0, x1, y1] of boxes) {
+    for (let y = y0; y <= y1; y++) mask.fill(0, y * width + x0, y * width + x1 + 1);
+  }
   for (let i = 0; i < n; i++) share += mask[i];
   // Text and icons on the page are what separate a screenshot from a product on white.
-  return { mask, share: share / n, ink: (n - page - kept) / page };
+  return { mask, share: share / n, ink: ink / page };
 }
 
 function isPartialScreenshot({ share, ink }) {
@@ -240,6 +254,17 @@ function isPartialScreenshot({ share, ink }) {
 // mayBeFrame already looked at the shape, and a frame may have no text on it.
 function isFrameScreenshot({ share }) {
   return share >= 0.03 && share <= 0.5;
+}
+
+// Takes a pixel off the edge of everything in the mask.
+function shrunk(mask, width) {
+  const out = mask.slice(), n = mask.length;
+  for (let i = 0; i < n; i++) {
+    if (!mask[i]) continue;
+    if ((i % width && !mask[i - 1]) || ((i + 1) % width && !mask[i + 1]) ||
+      (i >= width && !mask[i - width]) || (i + width < n && !mask[i + width])) out[i] = 0;
+  }
+  return out;
 }
 
 // Grows the mask by a pixel, because the pixels at an edge are a blend that isn't
