@@ -95,7 +95,7 @@
         @keyframes second { 0% { fill-opacity: 0; } 25%, 100% { fill-opacity: 1; } }
         @keyframes third { 0% { fill-opacity: 0; } 50% { fill-opacity: 1; } 75%, 100% { fill-opacity: 0; } }
         g { animation: fade 0.2s ease-out 0.25s both; }
-        text { font: 500 9px system-ui, -apple-system, sans-serif; fill: #d7dadc; }
+        text { font: 400 9px system-ui, -apple-system, sans-serif; fill: #d7dadc; }
         ${still ? '' : `.icon { transform-box: fill-box; transform-origin: center; animation: pulse 1.4s ease-in-out infinite alternate; }
         .second { animation: second 2s step-end infinite; }
         .third { animation: third 2s step-end infinite; }`}
@@ -107,8 +107,8 @@
       <g>
         <rect width="100%" height="100%" fill="#0e1113"/>
         <svg x="100%" y="14" overflow="visible">
-          <rect class="icon" x="${label ? -48 : -30}" width="16" height="16" rx="3.5" fill="url(#sweep)"/>
-          ${label ? `<text x="-40" y="29" text-anchor="middle">Dark mode.<tspan class="second">.</tspan><tspan class="third">.</tspan></text>` : ''}
+          <rect class="icon" x="${label ? -50 : -34}" width="20" height="20" rx="4.5" fill="url(#sweep)"/>
+          ${label ? `<text x="-40" y="33" text-anchor="middle">Dark mode.<tspan class="second">.</tspan><tspan class="third">.</tspan></text>` : ''}
         </svg>
       </g>
     </svg>`) + '")';
