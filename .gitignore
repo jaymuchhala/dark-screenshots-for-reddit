@@ -7,3 +7,4 @@ dist/
 # Local tooling
 .claude/
 .DS_Store
+test/shots/

@@ -1,6 +1,8 @@
 (() => {
   const IMAGE_HOSTS = new Set(['i.redd.it', 'preview.redd.it', 'external-preview.redd.it']);
   const MIN_WIDTH = 80, MIN_HEIGHT = 50;
+  const LABEL_MIN_WIDTH = 80, LABEL_MIN_HEIGHT = 60;
+  const WAITING_INSET = 14, WAITING_MAX_BAR = 50;
   const REVEAL_AFTER_MS = 2500;
   const MAX_UPLOAD_BYTES = 30 * 1024 * 1024;
   const MAX_OVERRIDES = 500;
@@ -20,8 +22,8 @@
   // ---------- Reader: darken screenshots already on the page ----------
 
   const verdicts = new Map();   // image key -> pixel stats or null, or a promise while checking
-  const tracked = new Map();    // img -> { hidden, darkened, filter, visibility }
-  const players = new Map();    // video player -> { hidden, visibility, timer, expired }
+  const tracked = new Map();    // img -> { hidden, darkened, filter, held }
+  const players = new Map();    // video player -> { hidden, held, timer, expired }
   const partVideos = new Map(); // video darkened in parts -> { ready, stop }
   const observedRoots = new WeakSet();
   let lastRightClicked = null;
@@ -100,15 +102,108 @@
     return fallback;
   }
 
+  // Where the waiting picture's icon goes, in from the top right corner of what's on show.
+  // An ancestor can clip the box. A narrow bar beside a centered image looks like part of its
+  // dark box, so the top matches the distance to the edge beyond the bar. A wide bar doesn't.
+  function waitingInsets(el, box) {
+    let top = 0, right = 0;
+    for (let a = el.parentElement || el.getRootNode().host; a && a !== document.body; a = a.parentElement || a.getRootNode().host) {
+      if (!/hidden|clip/.test(getComputedStyle(a).overflow)) continue;
+      const clip = a.getBoundingClientRect();
+      if (clip.bottom <= box.top || clip.top >= box.bottom || clip.right <= box.left || clip.left >= box.right) continue;
+      top = Math.max(top, clip.top - box.top);
+      right = Math.max(right, box.right - clip.right);
+    }
+    const parent = el.parentElement && el.parentElement !== document.body ? el.parentElement.getBoundingClientRect() : box;
+    const bar = parent.right - box.right;
+    const centered = bar > 0 && Math.abs(bar - (box.left - parent.left)) < 2;
+    return { top: Math.round(top + WAITING_INSET + (centered && bar <= WAITING_MAX_BAR ? bar : 0)), right: Math.round(right + WAITING_INSET) };
+  }
+
+  // What a waiting image or video shows: a dark box with the icon and "Dark mode..."
+  // near its top right corner, the text on one line under the icon, squeezed to its width. Boxes too short for the text
+  // get the icon alone. The dots step in time with the sweep: both run for 2s. The delay
+  // keeps it from blinking when the wait is very short.
+  function waitingPicture(el) {
+    const still = matchMedia('(prefers-reduced-motion: reduce)').matches;
+    const box = el.getBoundingClientRect();
+    const inset = waitingInsets(el, box);
+    const label = !box.height || (box.width >= LABEL_MIN_WIDTH && box.height >= LABEL_MIN_HEIGHT);
+    return 'url("data:image/svg+xml,' + encodeURIComponent(`<svg xmlns="http://www.w3.org/2000/svg" width="100%" height="100%">
+      <style>
+        @keyframes fade { from { opacity: 0; } to { opacity: 1; } }
+        @keyframes pulse { from { transform: scale(1); } to { transform: scale(1.14); } }
+        @keyframes second { 0% { fill-opacity: 0; } 25%, 100% { fill-opacity: 1; } }
+        @keyframes third { 0% { fill-opacity: 0; } 50% { fill-opacity: 1; } 75%, 100% { fill-opacity: 0; } }
+        g { animation: fade 0.2s ease-out 0.25s both; }
+        text { font: 400 4.5px system-ui, -apple-system, sans-serif; fill: #d7dadc; }
+        ${still ? '' : `.icon { transform-box: fill-box; transform-origin: center; animation: pulse 1.4s ease-in-out infinite alternate; }
+        .second { animation: second 2s step-end infinite; }
+        .third { animation: third 2s step-end infinite; }`}
+      </style>
+      <linearGradient id="sweep" gradientUnits="userSpaceOnUse" x2="32" y2="32" spreadMethod="repeat">
+        <stop offset="0" stop-color="#f6f7f8"/><stop offset="0.25" stop-color="#181b1e"/><stop offset="0.5" stop-color="#f6f7f8"/><stop offset="0.75" stop-color="#181b1e"/><stop offset="1" stop-color="#f6f7f8"/>
+        ${still ? '' : '<animateTransform attributeName="gradientTransform" type="translate" from="0" to="32" dur="2s" repeatCount="indefinite"/>'}
+      </linearGradient>
+      <g>
+        <rect width="100%" height="100%" fill="#0e1113"/>
+        <svg x="100%" y="${inset.top}" overflow="visible">
+          <rect class="icon" x="${-inset.right - 20}" width="20" height="20" rx="4.5" fill="url(#sweep)"/>
+          ${label ? `<text x="${-inset.right - 20}" y="27" textLength="20" lengthAdjust="spacingAndGlyphs">Dark mode.<tspan class="second">.</tspan><tspan class="third">.</tspan></text>` : ''}
+        </svg>
+      </g>
+    </svg>`) + '")';
+  }
+
+  // Reddit stacks blurred, faded copies behind its images. The icon belongs on the image.
+  const isBackdrop = (img) => /post-background-image-filter|blur-\[/.test(img.className) || getComputedStyle(img).filter !== 'none';
+
+  // Moving the picture out of its own box hides it and leaves the box, with its
+  // background, on show. `transparent` covers any placeholder color of the site's.
+  function holdStyles(el) {
+    if (el.localName === 'shreddit-player') return { visibility: 'hidden', '--dark-screenshots-waiting': waitingPicture(el) };
+    if (el.localName !== 'img' || isBackdrop(el)) return { visibility: 'hidden' };
+    return {
+      'object-position': '-99999px -99999px',
+      'background-color': 'transparent',
+      'background-image': waitingPicture(el),
+      'background-position': '0 0',
+      'background-size': '100% 100%',
+      'background-repeat': 'no-repeat',
+    };
+  }
+
+  // Reddit lays an image out again as it loads, so the picture follows its box and parent.
+  function followLayout(el, state) {
+    const name = el.localName === 'img' ? 'background-image' : '--dark-screenshots-waiting';
+    if (!(name in holdStyles(el))) return;
+    state.picture = el.style.getPropertyValue(name);
+    state.layout = new ResizeObserver(() => {
+      const picture = waitingPicture(el);
+      if (picture === state.picture) return;
+      state.picture = picture;
+      el.style.setProperty(name, picture, 'important');
+    });
+    state.layout.observe(el);
+    if (el.parentElement) state.layout.observe(el.parentElement);
+  }
+
   function setHidden(img, state, hidden) {
     if (state.hidden === hidden) return;
     state.hidden = hidden;
     if (hidden) {
-      state.visibility = img.style.getPropertyValue('visibility');
-      img.style.setProperty('visibility', 'hidden', 'important');
+      state.held = {};
+      for (const [name, value] of Object.entries(holdStyles(img))) {
+        state.held[name] = img.style.getPropertyValue(name);
+        img.style.setProperty(name, value, 'important');
+      }
+      followLayout(img, state);
     } else {
-      img.style.removeProperty('visibility');
-      if (state.visibility) img.style.setProperty('visibility', state.visibility);
+      state.layout?.disconnect();
+      for (const [name, value] of Object.entries(state.held)) {
+        img.style.removeProperty(name);
+        if (value) img.style.setProperty(name, value);
+      }
     }
   }
 
@@ -279,7 +374,7 @@
   function holdPlayer(player) {
     if (players.has(player) || !playerUrl(player)) return;
     clearLeftovers(player);
-    players.set(player, { hidden: false, visibility: '', timer: null, expired: false });
+    players.set(player, { hidden: false, held: {}, timer: null, expired: false });
     viewport.observe(player);
     updatePlayer(player);
   }
@@ -293,7 +388,7 @@
     const ready = tracked.get(video)?.darkened && partVideos.get(video)?.ready !== false;
     const hold = dark && !ready && !state.expired;
     setHidden(player, state, hold);
-    player.toggleAttribute('data-applying-dark', hold);   // Shows the animated icon in content.css.
+    player.toggleAttribute('data-applying-dark', hold);   // Shows the waiting picture, through content.css.
   }
 
   let videoChecks = 0;
@@ -369,7 +464,7 @@
   // dropped from `tracked` and put back, so an image can arrive with these styles
   // already on it. Only this script sets them as important.
   function clearLeftovers(img) {
-    for (const name of ['visibility', 'filter', 'background-color']) {
+    for (const name of ['visibility', 'filter', 'object-position', 'background-color', 'background-image', 'background-position', 'background-size', 'background-repeat']) {
       if (img.style.getPropertyPriority(name) === 'important') img.style.removeProperty(name);
     }
   }
@@ -379,7 +474,7 @@
     let state = tracked.get(img);
     if (!state) {
       clearLeftovers(img);
-      state = { hidden: false, darkened: false, filter: '', visibility: '', background: '' };
+      state = { hidden: false, darkened: false, filter: '', held: {}, background: '' };
       tracked.set(img, state);
       viewport.observe(img);
     }

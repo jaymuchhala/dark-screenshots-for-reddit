@@ -1,58 +1,16 @@
-/* Shown over a video player while its video is being checked: the extension's icon,
-   with its light and dark sides sweeping left to right as it slowly grows and shrinks,
-   near the top right corner. */
+/* Shown over a video player while its video is being checked. A player's content is out of
+   reach in its shadow root, so `waitingPicture` in content.js hands the picture over in a
+   custom property. */
 [data-applying-dark] {
   position: relative !important;
 }
 
-[data-applying-dark]::before,
 [data-applying-dark]::after {
+  content: "";
   position: absolute;
-  visibility: visible !important;
-  pointer-events: none;
-}
-
-/* The tile is twice the icon, so moving it one tile across lines up with the start. */
-[data-applying-dark]::before {
-  content: "";
-  z-index: 2;
-  top: 14px;
-  right: 14px;
-  width: 16px;
-  height: 16px;
-  border-radius: 22%;
-  background: linear-gradient(135deg, #f6f7f8, #181b1e 25%, #f6f7f8 50%, #181b1e 75%, #f6f7f8) 0 0 / 32px 32px;
-  animation:
-    dark-screenshots-fade 0.2s ease-out 0.25s both,
-    dark-screenshots-sweep 2s linear infinite,
-    dark-screenshots-pulse 1.4s ease-in-out infinite alternate;
-}
-
-/* The delay keeps it from blinking on a reload, when the wait is very short. */
-[data-applying-dark]::after {
-  content: "";
   z-index: 1;
   inset: 0;
-  background: #0e1113;
-  animation: dark-screenshots-fade 0.2s ease-out 0.25s both;
-}
-
-@keyframes dark-screenshots-fade {
-  from { opacity: 0; }
-  to { opacity: 1; }
-}
-
-@keyframes dark-screenshots-sweep {
-  to { background-position-x: 32px; }
-}
-
-@keyframes dark-screenshots-pulse {
-  from { scale: 1; }
-  to { scale: 1.14; }
-}
-
-@media (prefers-reduced-motion: reduce) {
-  [data-applying-dark]::before {
-    animation: dark-screenshots-fade 0.2s ease-out 0.25s both;
-  }
+  visibility: visible !important;
+  pointer-events: none;
+  background: var(--dark-screenshots-waiting) 0 0 / 100% 100% no-repeat;
 }
