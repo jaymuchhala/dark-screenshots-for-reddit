@@ -185,6 +185,46 @@ function pageColors(data, n) {
     .map(([key]) => [(key >> 10) * 8 + 4, ((key >> 5) & 31) * 8 + 4, (key & 31) * 8 + 4]);
 }
 
+// A white ceiling in a photo can run into a white page and bite into a group, and a
+// panel over a photo joins the two. So a big group is cut into the rectangles it mostly
+// fills, which gives photos and panels straight edges.
+function groupBoxes(pixels, width, n) {
+  const boxes = [];
+  for (let round = 0; round < 4 && pixels.length >= n * 0.03; round++) {
+    const rows = new Map(), cols = new Map();
+    for (const c of pixels) {
+      const x = c % width, y = (c - x) / width;
+      rows.set(y, (rows.get(y) || 0) + 1);
+      cols.set(x, (cols.get(x) || 0) + 1);
+    }
+    const ys = [...rows.keys()], xs = [...cols.keys()];
+    const boxW = Math.max(...xs) - Math.min(...xs) + 1, boxH = Math.max(...ys) - Math.min(...ys) + 1;
+    const fullX = xs.filter((x) => cols.get(x) >= boxH * 0.4), fullY = ys.filter((y) => rows.get(y) >= boxW * 0.4);
+    if (!fullX.length || !fullY.length) break;
+    let x0 = Math.min(...fullX), x1 = Math.max(...fullX), y0 = Math.min(...fullY), y1 = Math.max(...fullY);
+    // A panel sticking out past a photo shouldn't drag the box out over the page with it.
+    const line = (fromX, fromY, toX, toY) => {
+      let on = 0;
+      for (let y = fromY; y <= toY; y++) for (let x = fromX; x <= toX; x++) if (set[y * width + x]) on++;
+      return on / ((toX - fromX + 1) * (toY - fromY + 1));
+    };
+    const set = new Uint8Array(n);
+    for (const c of pixels) set[c] = 1;
+    while (y0 < y1 && line(x0, y0, x1, y0) < 0.5) y0++;
+    while (y0 < y1 && line(x0, y1, x1, y1) < 0.5) y1--;
+    while (x0 < x1 && line(x0, y0, x0, y1) < 0.5) x0++;
+    while (x0 < x1 && line(x1, y0, x1, y1) < 0.5) x1--;
+    const inside = (c) => { const x = c % width, y = (c - x) / width; return x >= x0 && x <= x1 && y >= y0 && y <= y1; };
+    let count = 0;
+    for (const c of pixels) if (inside(c)) count++;
+    // Anything less than mostly filled is several things still joined up, not one photo.
+    if (count < (x1 - x0 + 1) * (y1 - y0 + 1) * 0.6) break;
+    boxes.push([x0, y0, x1, y1]);
+    pixels = pixels.filter((c) => !inside(c));
+  }
+  return boxes;
+}
+
 // Returns which pixels to darken and how the split came out, or null if there's no page.
 function pageMask(data, width, height) {
   const n = width * height;
@@ -196,6 +236,21 @@ function pageMask(data, width, height) {
     if (colors.some((c) => Math.abs(r - c[0]) <= 10 && Math.abs(g - c[1]) <= 10 && Math.abs(b - c[2]) <= 10)) pale[i] = 1;
   }
   const queue = new Int32Array(n);
+  // A frame around the page can be a gradient, too spread out to count above. Pale
+  // pixels joined to the edge of the image are page too.
+  const paleAny = new Uint8Array(n);
+  for (let i = 0; i < n; i++) {
+    const r = data[i * 4], g = data[i * 4 + 1], b = data[i * 4 + 2];
+    if (0.299 * r + 0.587 * g + 0.114 * b >= 205 && Math.max(r, g, b) - Math.min(r, g, b) <= 48) paleAny[i] = 1;
+  }
+  eachGroup(paleAny, width, queue, (start, end) => {
+    let touches = false;
+    for (let i = start; i < end && !touches; i++) {
+      const c = queue[i], x = c % width;
+      touches = x === 0 || x === width - 1 || c < width || c >= n - width;
+    }
+    if (touches) for (let i = start; i < end; i++) pale[queue[i]] = 1;
+  });
   // The page is the big pale areas. Small pale spots are part of what's on top of it.
   const other = new Uint8Array(n).fill(1);
   let page = 0;
@@ -214,23 +269,8 @@ function pageMask(data, width, height) {
   const boxes = [];
   eachGroup(solid, width, queue, (start, end) => {
     if (end - start < n * 0.004) return;
-    // A white ceiling in a photo can run into a white page and bite into the group, so
-    // a big group is squared off along the rows and columns it mostly fills.
-    const rows = new Map(), cols = new Map();
-    for (let i = start; i < end; i++) {
-      const c = queue[i], x = c % width, y = (c - x) / width;
-      keep[c] = 1;
-      rows.set(y, (rows.get(y) || 0) + 1);
-      cols.set(x, (cols.get(x) || 0) + 1);
-    }
-    if (end - start < n * 0.03) return;
-    const ys = [...rows.keys()], xs = [...cols.keys()];
-    const boxW = Math.max(...xs) - Math.min(...xs) + 1, boxH = Math.max(...ys) - Math.min(...ys) + 1;
-    const fullX = xs.filter((x) => cols.get(x) >= boxH * 0.6), fullY = ys.filter((y) => rows.get(y) >= boxW * 0.6);
-    if (!fullX.length || !fullY.length) return;
-    const x0 = Math.min(...fullX), x1 = Math.max(...fullX), y0 = Math.min(...fullY), y1 = Math.max(...fullY);
-    // Anything less than mostly filled is several things still joined up, not one photo.
-    if (end - start >= (x1 - x0 + 1) * (y1 - y0 + 1) * 0.6) boxes.push([x0, y0, x1, y1]);
+    for (let i = start; i < end; i++) keep[queue[i]] = 1;
+    if (end - start >= n * 0.03) boxes.push(...groupBoxes(queue.slice(start, end), width, n));
   });
   for (let i = 0; i < PARTIAL_THIN_LINE; i++) keep = grown(keep, width);
   const mask = new Uint8Array(n);
