@@ -626,7 +626,29 @@ function lightRegions(data, width, height) {
     if (regions.length === 6) break;
   }
   // Merging goes last, with a fresh look at what came of it.
-  return mergeRegions(regions, width, height).filter((box) => finishRegion(box, data, pale, width, height));
+  return mergeRegions(regions, width, height).filter((box) => finishRegion(box, data, pale, width, height)).map((box) => softenEdges(box, data, width, height));
+}
+
+// Scaling blurs an edge into a row or two that aren't pale, yet look white once what's next
+// to them is dark. The filter darkens anything over mid-gray, so the box takes those in too.
+function softenEdges(box, data, width, height) {
+  const lit = (x0, y0, x1, y1) => {
+    if (x0 < 0 || y0 < 0 || x1 >= width || y1 >= height) return false;
+    let count = 0;
+    for (let y = y0; y <= y1; y++) {
+      for (let x = x0; x <= x1; x++) {
+        const i = (y * width + x) * 4;
+        if (0.299 * data[i] + 0.587 * data[i + 1] + 0.114 * data[i + 2] >= 128) count++;
+      }
+    }
+    return count >= (x1 - x0 + 1) * (y1 - y0 + 1) * 0.5;
+  };
+  let x0 = box.x, y0 = box.y, x1 = box.x + box.w - 1, y1 = box.y + box.h - 1;
+  for (let i = 0; i < 3 && lit(x0, y0 - 1, x1, y0 - 1); i++) y0--;
+  for (let i = 0; i < 3 && lit(x0, y1 + 1, x1, y1 + 1); i++) y1++;
+  for (let i = 0; i < 3 && lit(x0 - 1, y0, x0 - 1, y1); i++) x0--;
+  for (let i = 0; i < 3 && lit(x1 + 1, y0, x1 + 1, y1); i++) x1++;
+  return { ...box, x: x0, y: y0, w: x1 - x0 + 1, h: y1 - y0 + 1 };
 }
 
 // A dark row, like the selected one in a list, can cut a panel in two.
