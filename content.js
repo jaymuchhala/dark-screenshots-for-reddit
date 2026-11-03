@@ -172,7 +172,9 @@
     const key = imageKey(playerUrl(player));
     const dark = key in overrides ? overrides[key] : readerActive(player) && verdicts.get(key) !== null;
     const video = player.shadowRoot?.querySelector('video');
-    setHidden(player, state, dark && !tracked.get(video)?.darkened && !state.expired);
+    const hold = dark && !tracked.get(video)?.darkened && !state.expired;
+    setHidden(player, state, hold);
+    player.toggleAttribute('data-applying-dark', hold);   // Shows the animated icon in content.css.
   }
 
   let videoChecks = 0;

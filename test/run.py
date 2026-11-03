@@ -78,6 +78,7 @@ clip('vid-intro.webm', [BLACK, *UI[1:]])
 clip('vid-photo.webm', [PHOTO, SKY, PHOTO, SKY, PHOTO])
 clip('vid-mixed.webm', [UI[0], PHOTO, UI[1], SKY, UI[2]])
 clip('vid-late.webm', UI[:4])
+clip('vid-hold.webm', UI[:4])
 clip('vid-gif.webm', UI[1:])
 clip('vid-nocors.webm', UI[:3])
 
@@ -376,6 +377,26 @@ with sync_playwright() as p:
     again.evaluate(ADD, ['gone', {'preview': f'{media}/vid-photo.webm'}, False]); again.wait_for_timeout(300)
     check('reload: a video left alone shows right away', again.evaluate("getComputedStyle(document.getElementById('gone')).visibility") == 'visible' and not again.evaluate("document.getElementById('gone').shadowRoot.querySelector('video').style.filter"))
     again.close()
+
+    # While the check runs, the player shows the animated icon instead of an empty box.
+    stalled = []
+    ctx.route('**/vid-hold.webm', lambda route: stalled.append(route))
+    hold = ctx.new_page(); hold.goto(base + '/index.html'); hold.wait_for_timeout(200)
+    hold.evaluate(ADD, ['h', {'preview': f'{media}/vid-hold.webm'}, False])
+    hold.wait_for_timeout(800)
+    def before(page, prop): return page.evaluate("prop => getComputedStyle(document.getElementById('h'), '::before')[prop]", prop)
+    check('loading icon: shown while checking', before(hold, 'content') != 'none' and before(hold, 'visibility') == 'visible' and before(hold, 'opacity') == '1', before(hold, 'content'))
+    check('loading icon: has its message', 'Applying dark mode...' in hold.evaluate("getComputedStyle(document.getElementById('h'), '::after').content"))
+    check('loading icon: sweeps and pulses', all(name in before(hold, 'animationName') for name in ('sweep', 'pulse')), before(hold, 'animationName'))
+    check('loading icon: video stays hidden', hold.evaluate("getComputedStyle(document.getElementById('h').shadowRoot.querySelector('video')).visibility") == 'hidden')
+    for i in range(3):
+        hold.screenshot(path=f'{work}/applying{i}.png', clip={'x': 0, 'y': 0, 'width': 300, 'height': 170})
+        hold.wait_for_timeout(500)
+    for route in stalled: route.continue_()
+    ctx.unroute('**/vid-hold.webm')
+    hold.wait_for_timeout(2500)
+    check('loading icon: gone once dark', before(hold, 'content') == 'none' and 'invert' in hold.evaluate("document.getElementById('h').shadowRoot.querySelector('video').style.filter"), before(hold, 'content'))
+    hold.close()
 
     # Right-click override on a video
     vid.bring_to_front()

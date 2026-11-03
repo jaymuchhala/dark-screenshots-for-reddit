@@ -1,0 +1,65 @@
+/* Shown over a video player while its video is being checked: the extension's icon,
+   with its light and dark sides sweeping left to right as it slowly grows and shrinks,
+   above a short message. */
+[data-applying-dark] {
+  position: relative !important;
+}
+
+[data-applying-dark]::before,
+[data-applying-dark]::after {
+  position: absolute;
+  visibility: visible !important;
+  pointer-events: none;
+}
+
+/* The tile is twice the icon, so moving it one tile across lines up with the start. */
+[data-applying-dark]::before {
+  content: "";
+  z-index: 2;
+  top: calc(50% - 36px);
+  left: calc(50% - 22px);
+  width: 44px;
+  height: 44px;
+  border-radius: 22%;
+  background: linear-gradient(135deg, #f6f7f8, #181b1e 25%, #f6f7f8 50%, #181b1e 75%, #f6f7f8) 0 0 / 88px 88px;
+  animation:
+    dark-screenshots-fade 0.2s ease-out 0.25s both,
+    dark-screenshots-sweep 2s linear infinite,
+    dark-screenshots-pulse 1.4s ease-in-out infinite alternate;
+}
+
+/* The delay keeps it from blinking on a reload, when the wait is very short. */
+[data-applying-dark]::after {
+  content: "Applying dark mode...";
+  z-index: 1;
+  inset: 0;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  padding-top: 54px;
+  box-sizing: border-box;
+  background: #0e1113;
+  color: #f2f4f5;
+  font: 13px/1.4 system-ui, sans-serif;
+  animation: dark-screenshots-fade 0.2s ease-out 0.25s both;
+}
+
+@keyframes dark-screenshots-fade {
+  from { opacity: 0; }
+  to { opacity: 1; }
+}
+
+@keyframes dark-screenshots-sweep {
+  to { background-position-x: 88px; }
+}
+
+@keyframes dark-screenshots-pulse {
+  from { scale: 1; }
+  to { scale: 1.14; }
+}
+
+@media (prefers-reduced-motion: reduce) {
+  [data-applying-dark]::before {
+    animation: dark-screenshots-fade 0.2s ease-out 0.25s both;
+  }
+}
