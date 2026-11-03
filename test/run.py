@@ -1,6 +1,6 @@
 # Loads a copy of the extension pointed at localhost and runs it on a mock page.
 # usage: python3 test/run.py <screenshots dir> <work dir>
-import http.server, json, os, shutil, subprocess, sys, threading, functools, glob, time
+import base64, http.server, json, os, shutil, subprocess, sys, threading, functools, glob, time
 from playwright.sync_api import sync_playwright
 
 ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
@@ -259,7 +259,7 @@ with sync_playwright() as p:
       const p = document.createElement('shreddit-player'); p.id = id; p.style.cssText = 'display:block;width:300px;height:170px';
       for (const [k, v] of Object.entries(attrs)) p.setAttribute(k, v);
       document.getElementById('f').append(p);
-      const fill = () => { const s = p.attachShadow({mode:'open'}); const v = document.createElement('video'); v.style.cssText='width:100%;height:100%;object-fit:contain';
+      const fill = () => { const s = p.attachShadow({mode:'open'}); const v = document.createElement('video'); v.style.cssText='width:100%;height:100%;object-fit:contain;background:#000';
         const lazy = document.createElement('shreddit-preview-video-lazy'); const h = document.createElement('video'); h.className = 'scrub'; h.src = attrs.preview || ''; h.style.cssText = 'width:100px;height:60px'; lazy.attachShadow({mode:'open'}).append(h); s.append(v, lazy); };
       late ? setTimeout(fill, 1200) : fill();
     }"""
@@ -298,6 +298,17 @@ with sync_playwright() as p:
     check('no video stuck hidden', vid.evaluate("[...document.querySelectorAll('shreddit-player')].every(p => [...p.shadowRoot.querySelectorAll('video')].every(v => v.style.visibility !== 'hidden'))"))
     check('scrubber thumbnail left alone', vid.evaluate("[...document.querySelectorAll('shreddit-player')].every(p => !p.shadowRoot.querySelector('shreddit-preview-video-lazy').shadowRoot.querySelector('video').style.filter)"))
     vid.screenshot(path=f'{work}/videos.png', full_page=True)
+    # The bars beside a tall video stay dark, darkened or not.
+    def bar(id):
+        shot = base64.b64encode(vid.locator(f'#{id} video').first.screenshot()).decode()
+        return vid.evaluate("""async (shot) => {
+          const bitmap = await createImageBitmap(await (await fetch('data:image/png;base64,' + shot)).blob());
+          const ctx = new OffscreenCanvas(bitmap.width, bitmap.height).getContext('2d');
+          ctx.drawImage(bitmap, 0, 0);
+          return ctx.getImageData(5, 85, 1, 1).data[0];
+        }""", shot)
+    check('tall video: bars stay dark', bar('phone') <= 40, bar('phone'))
+    check('photo video: bars untouched', bar('photo') <= 40, bar('photo'))
 
     # Right-click override on a video
     vid.bring_to_front()
@@ -308,6 +319,7 @@ with sync_playwright() as p:
         vid.wait_for_timeout(300)
     toggle()
     check('video override turns it off', not vfilter('ui'))
+    check('video override restores the background', vid.evaluate("document.getElementById('ui').shadowRoot.querySelector('video').style.backgroundColor") == 'rgb(0, 0, 0)')
     toggle()
     check('video override turns it on', 'invert' in vfilter('ui'))
 

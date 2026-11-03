@@ -79,9 +79,19 @@
       // Keep any filter the site has, such as the blur on Reddit's post backdrop.
       const current = getComputedStyle(img).filter;
       img.style.setProperty('filter', `${current === 'none' ? '' : current + ' '}${DARK_FILTER}`, 'important');
+      // The filter also covers the player's black bars beside a tall video, turning
+      // them almost white. A white background comes out dark instead.
+      if (img.localName === 'video') {
+        state.background = img.style.getPropertyValue('background-color');
+        img.style.setProperty('background-color', '#fff', 'important');
+      }
     } else {
       img.style.removeProperty('filter');
       if (state.filter) img.style.setProperty('filter', state.filter);
+      if (img.localName === 'video') {
+        img.style.removeProperty('background-color');
+        if (state.background) img.style.setProperty('background-color', state.background);
+      }
     }
   }
 
@@ -166,7 +176,7 @@
   // dropped from `tracked` and put back, so an image can arrive with these styles
   // already on it. Only this script sets them as important.
   function clearLeftovers(img) {
-    for (const name of ['visibility', 'filter']) {
+    for (const name of ['visibility', 'filter', 'background-color']) {
       if (img.style.getPropertyPriority(name) === 'important') img.style.removeProperty(name);
     }
   }
@@ -176,7 +186,7 @@
     let state = tracked.get(img);
     if (!state) {
       clearLeftovers(img);
-      state = { hidden: false, darkened: false, filter: '', visibility: '' };
+      state = { hidden: false, darkened: false, filter: '', visibility: '', background: '' };
       tracked.set(img, state);
       viewport.observe(img);
     }
