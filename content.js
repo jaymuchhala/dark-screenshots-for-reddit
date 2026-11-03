@@ -4,8 +4,10 @@
   const REVEAL_AFTER_MS = 2500;
   const MAX_UPLOAD_BYTES = 30 * 1024 * 1024;
   const MAX_OVERRIDES = 500;
+  const MAX_VIDEO_CHECKS = 2;
+  const PLAYER_TRIES = 20, PLAYER_RETRY_MS = 500;
 
-  let settings = { reader: true, readerMode: 'theme', uploader: true, tinted: true };
+  let settings = { reader: true, readerMode: 'theme', videos: false, uploader: true, tinted: true };
   let overrides = {};
   const systemDark = matchMedia('(prefers-color-scheme: dark)');
 
@@ -17,9 +19,22 @@
   let lastRightClicked = null;
 
   // A tab left open across an extension reload has no runtime, so it can't check images.
-  const readerActive = () => chrome.runtime?.id && settings.reader && (settings.readerMode === 'always' || systemDark.matches);
+  const readerActive = (el) => chrome.runtime?.id && settings.reader && (el.localName !== 'video' || settings.videos) &&
+    (settings.readerMode === 'always' || systemDark.matches);
+
+  // Reddit's player keeps a tiny copy of the video in `preview`, and any page can read
+  // its pixels. GIF posts have no preview, but their own file is readable. Other videos
+  // in the player, such as the scrubber's thumbnail, aren't darkened.
+  function videoUrl(video) {
+    const player = video.getRootNode().host;
+    if (!player || !isPlayer(player)) return null;
+    return player.getAttribute('preview') || (player.hasAttribute('gif') && player.getAttribute('src')) || null;
+  }
+
+  const isPlayer = (el) => el.localName === 'shreddit-player' || el.localName === 'shreddit-player-2';
 
   function imageUrl(img) {
+    if (img.localName === 'video') return videoUrl(img);
     const url = img.currentSrc || img.src;
     try {
       return IMAGE_HOSTS.has(new URL(url).hostname) ? url : null;
@@ -86,24 +101,42 @@
       setDarkened(img, state, overrides[key]);
       return true;
     }
-    if (!readerActive()) {
+    if (!readerActive(img)) {
       setHidden(img, state, false);
       setDarkened(img, state, false);
       return true;
     }
     const stats = verdicts.get(key);
     if (stats === null || (stats && !(stats instanceof Promise))) {
-      setDarkened(img, state, !!stats && isLightScreenshot(stats, settings.tinted));
+      // A video's verdict is already true or null. An image's depends on the settings.
+      setDarkened(img, state, stats === true || (!!stats && isLightScreenshot(stats, settings.tinted)));
       setHidden(img, state, false);
       return true;
     }
     return false;
   }
 
+  let videoChecks = 0;
+  const videoQueue = [];
+
+  async function withVideoSlot(job) {
+    if (videoChecks >= MAX_VIDEO_CHECKS) await new Promise((resolve) => videoQueue.push(resolve));
+    videoChecks++;
+    try {
+      return await job();
+    } finally {
+      videoChecks--;
+      videoQueue.shift()?.();
+    }
+  }
+
   function checkVerdict(img, url) {
     const key = imageKey(url);
     if (verdicts.has(key)) return verdicts.get(key);
-    const pending = chrome.runtime.sendMessage({ type: 'check-image', url: smallestUrl(img, url) })
+    const check = img.localName === 'video'
+      ? withVideoSlot(() => isLightVideo(url))
+      : chrome.runtime.sendMessage({ type: 'check-image', url: smallestUrl(img, url) });
+    const pending = check
       .catch(() => null)
       .then((result) => {
         verdicts.set(key, result || null);
@@ -148,17 +181,27 @@
       viewport.observe(img);
     }
     // Hidden from the start so an unchecked screenshot never flashes white.
-    if (!render(img) && readerActive()) setHidden(img, state, true);
+    if (!render(img) && readerActive(img)) setHidden(img, state, true);
+  }
+
+  const isMedia = (el) => el.localName === 'img' || el.localName === 'video';
+
+  // The player's script loads late, so its shadow root may not exist yet.
+  function watchPlayer(player, tries = PLAYER_TRIES) {
+    if (player.shadowRoot) watchRoot(player.shadowRoot);
+    else if (tries && player.isConnected) setTimeout(() => watchPlayer(player, tries - 1), PLAYER_RETRY_MS);
   }
 
   function scan(node) {
     if (node.nodeType !== Node.ELEMENT_NODE && node.nodeType !== Node.DOCUMENT_FRAGMENT_NODE && node.nodeType !== Node.DOCUMENT_NODE) return;
-    if (node.localName === 'img') track(node);
+    if (node.nodeType === Node.ELEMENT_NODE && isMedia(node)) track(node);
+    if (node.nodeType === Node.ELEMENT_NODE && isPlayer(node)) watchPlayer(node);
     if (node.shadowRoot) watchRoot(node.shadowRoot);
     const walker = document.createTreeWalker(node, NodeFilter.SHOW_ELEMENT);
     while (walker.nextNode()) {
       const el = walker.currentNode;
-      if (el.localName === 'img') track(el);
+      if (isMedia(el)) track(el);
+      else if (isPlayer(el)) watchPlayer(el);
       else if (el.shadowRoot) watchRoot(el.shadowRoot);
     }
   }
@@ -204,7 +247,7 @@
     for (const img of tracked.keys()) {
       viewport.unobserve(img);
       viewport.observe(img);
-      if (!render(img) && readerActive()) setHidden(img, tracked.get(img), true);
+      if (!render(img) && readerActive(img)) setHidden(img, tracked.get(img), true);
     }
   }
 
@@ -225,7 +268,7 @@
 
   window.addEventListener('contextmenu', (e) => {
     const el = e.composedPath()[0];
-    lastRightClicked = el?.localName === 'img' ? el : null;
+    lastRightClicked = el && isMedia(el) ? el : null;
   }, true);
 
   chrome.runtime.onMessage.addListener((msg) => {

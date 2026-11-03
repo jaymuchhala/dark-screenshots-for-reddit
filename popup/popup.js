@@ -1,5 +1,6 @@
-const DEFAULTS = { reader: true, readerMode: 'theme', uploader: true, tinted: true };
+const DEFAULTS = { reader: true, readerMode: 'theme', videos: false, uploader: true, tinted: true };
 const reader = document.getElementById('reader');
+const videos = document.getElementById('videos');
 const uploader = document.getElementById('uploader');
 const tinted = document.getElementById('tinted');
 const modeBox = document.getElementById('readerMode');
@@ -7,6 +8,7 @@ const modes = [...document.querySelectorAll('input[name=readerMode]')];
 
 function show(settings) {
   reader.checked = settings.reader;
+  videos.checked = settings.videos;
   uploader.checked = settings.uploader;
   tinted.checked = settings.tinted;
   modes.forEach((radio) => { radio.checked = radio.value === settings.readerMode; });
@@ -16,6 +18,7 @@ function show(settings) {
 function save() {
   const settings = {
     reader: reader.checked,
+    videos: videos.checked,
     uploader: uploader.checked,
     tinted: tinted.checked,
     readerMode: modes.find((radio) => radio.checked).value,
@@ -26,5 +29,5 @@ function save() {
 
 chrome.storage.local.get('settings').then((stored) => {
   show({ ...DEFAULTS, ...stored.settings });
-  [reader, uploader, tinted, ...modes].forEach((input) => input.addEventListener('change', save));
+  [reader, videos, uploader, tinted, ...modes].forEach((input) => input.addEventListener('change', save));
 });

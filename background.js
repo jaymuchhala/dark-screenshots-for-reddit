@@ -58,11 +58,17 @@ chrome.runtime.onInstalled.addListener(() => {
       contexts: ['image'],
       documentUrlPatterns: ['https://*.reddit.com/*', 'https://reddit.com/*'],
     });
+    chrome.contextMenus.create({
+      id: 'toggle-dark-video',
+      title: 'Change dark mode',
+      contexts: ['video'],
+      documentUrlPatterns: ['https://*.reddit.com/*', 'https://reddit.com/*'],
+    });
   });
 });
 
 chrome.contextMenus.onClicked.addListener((info, tab) => {
-  if (info.menuItemId === 'toggle-dark') {
+  if (info.menuItemId === 'toggle-dark' || info.menuItemId === 'toggle-dark-video') {
     chrome.tabs.sendMessage(tab.id, { type: 'toggle-image' }, { frameId: info.frameId }).catch(() => {});
   }
 });

@@ -36,6 +36,51 @@ srv = http.server.ThreadingHTTPServer(('localhost', 0), Q)
 threading.Thread(target=srv.serve_forever, daemon=True).start()
 base = f'http://localhost:{srv.server_port}'
 
+# Another origin for video previews, with Range like v.redd.it. /nocors/ leaves out the CORS header.
+class Media(Q):
+    def do_GET(self):
+        path = f'{site}/{self.path.split("?")[0].replace("/nocors/", "/").lstrip("/")}'
+        if not os.path.isfile(path): return self.send_error(404)
+        data = open(path, 'rb').read()
+        start, end, status = 0, len(data) - 1, 200
+        r = self.headers.get('Range')
+        if r:
+            a, b = r.split('=')[1].split('-')
+            start, end, status = int(a), int(b) if b else end, 206
+        self.send_response(status)
+        self.send_header('Content-Type', 'video/webm')
+        self.send_header('Accept-Ranges', 'bytes')
+        self.send_header('Content-Length', str(end - start + 1))
+        if status == 206: self.send_header('Content-Range', f'bytes {start}-{end}/{len(data)}')
+        if not self.path.startswith('/nocors/'): self.send_header('Access-Control-Allow-Origin', '*')
+        self.end_headers()
+        self.wfile.write(data[start:end + 1])
+media_srv = http.server.ThreadingHTTPServer(('localhost', 0), Media)
+threading.Thread(target=media_srv.serve_forever, daemon=True).start()
+media = f'http://localhost:{media_srv.server_port}'
+
+# Preview-sized clips. VP9 because Playwright's Chromium has no H.264.
+def clip(name, parts, size='170:96'):
+    inputs = [x for part in parts for x in ('-loop', '1', '-t', '2', '-r', '10', '-i', part)]
+    scale = ''.join(f'[{i}]scale={size}:force_original_aspect_ratio=increase,crop={size},setsar=1,format=yuv420p[v{i}];' for i in range(len(parts)))
+    joined = ''.join(f'[v{i}]' for i in range(len(parts))) + f'concat=n={len(parts)}:v=1[out]'
+    subprocess.run(['ffmpeg', '-v', 'error', '-y', *inputs, '-filter_complex', scale + joined, '-map', '[out]', '-c:v', 'libvpx-vp9', '-b:v', '64k', '-g', '10', f'{site}/{name}'], check=True)
+UI = [f'{site}/shot{i}.png' for i in (1, 2, 3, 4)]
+UI.append(UI[0])
+PHOTO = f'{site}/photo-Sonoma.jpg'
+SKY = f'{site}/photo-iMacBlue.jpg'
+BLACK = f'{work}/black.png'
+subprocess.run(['ffmpeg', '-v', 'error', '-y', '-f', 'lavfi', '-i', 'color=black:s=320x180', '-frames:v', '1', BLACK], check=True)
+clip('vid-ui.webm', UI)
+clip('vid-ui2.webm', list(reversed(UI)))
+clip('vid-ui-phone.webm', UI, '96:170')
+clip('vid-intro.webm', [BLACK, *UI[1:]])
+clip('vid-photo.webm', [PHOTO, SKY, PHOTO, SKY, PHOTO])
+clip('vid-mixed.webm', [UI[0], PHOTO, UI[1], SKY, UI[2]])
+clip('vid-late.webm', UI[:4])
+clip('vid-gif.webm', UI[1:])
+clip('vid-nocors.webm', UI[:3])
+
 # Images a screenshot detector must leave alone, plus a dark UI screenshot.
 MAKE = """async () => {
   const mk = async (name, w, h, draw, type='image/png') => {
@@ -207,11 +252,78 @@ with sync_playwright() as p:
     page.emulate_media(color_scheme='light'); page.wait_for_timeout(300)
     check('always mode ignores light theme', 'invert' in page.locator('img[alt="shot2.png"]').evaluate(FILTERED))
 
+    # Screen recordings. A player like Reddit's: the video in an open shadow root, the preview in an attribute.
+    vid = ctx.new_page()
+    vid.goto(base + '/index.html')
+    ADD = """([id, attrs, late]) => {
+      const p = document.createElement('shreddit-player'); p.id = id; p.style.cssText = 'display:block;width:300px;height:170px';
+      for (const [k, v] of Object.entries(attrs)) p.setAttribute(k, v);
+      document.getElementById('f').append(p);
+      const fill = () => { const s = p.attachShadow({mode:'open'}); const v = document.createElement('video'); v.style.cssText='width:100%;height:100%;object-fit:contain';
+        const lazy = document.createElement('shreddit-preview-video-lazy'); const h = document.createElement('video'); h.className = 'scrub'; h.src = attrs.preview || ''; h.style.cssText = 'width:100px;height:60px'; lazy.attachShadow({mode:'open'}).append(h); s.append(v, lazy); };
+      late ? setTimeout(fill, 1200) : fill();
+    }"""
+    def add(id, attrs, late=False): vid.evaluate(ADD, [id, attrs, late])
+    def vfilter(id): return vid.evaluate("id => { const v = document.getElementById(id).shadowRoot?.querySelector('video'); return v ? v.style.filter : null }", id)
+    def vhidden(id): return vid.evaluate("id => document.getElementById(id).shadowRoot.querySelector('video').style.visibility", id)
+
+    # Off: the setting defaults to off
+    sw.evaluate("chrome.storage.local.set({settings:{reader:true, readerMode:'always', videos:false, uploader:true}})")
+    vid.wait_for_timeout(200)
+    add('off', {'preview': f'{media}/vid-ui.webm'})
+    vid.wait_for_timeout(1500)
+    check('video setting off: left alone', not vfilter('off') and vhidden('off') == '')
+
+    sw.evaluate("chrome.storage.local.set({settings:{reader:true, readerMode:'always', videos:true, uploader:true}})")
+    vid.wait_for_timeout(200)
+    check('video setting on: applies live', 'invert' in (vfilter('off') or '') or vid.wait_for_timeout(3000) or 'invert' in (vfilter('off') or ''))
+
+    add('ui', {'preview': f'{media}/vid-ui2.webm'})
+    add('phone', {'preview': f'{media}/vid-ui-phone.webm'})
+    add('intro', {'preview': f'{media}/vid-intro.webm'})
+    add('photo', {'preview': f'{media}/vid-photo.webm'})
+    add('mixed', {'preview': f'{media}/vid-mixed.webm'})
+    add('gif', {'gif': '', 'src': f'{media}/vid-gif.webm'})
+    add('late', {'preview': f'{media}/vid-late.webm'}, True)
+    add('nocors', {'preview': f'{media}/nocors/vid-nocors.webm'})
+    add('dead', {'preview': f'{media}/missing.webm'})
+    add('nopreview', {})
+    vid.wait_for_timeout(600)
+    check('video hidden while checking', vhidden('ui') == 'hidden' or 'invert' in vfilter('ui'), vhidden('ui'))
+    vid.wait_for_timeout(9000)
+    for id in ('ui', 'phone', 'intro', 'gif', 'late'):
+        check(f'video {id}: darkened', 'invert' in (vfilter(id) or ''), vfilter(id))
+    for id in ('photo', 'mixed', 'nocors', 'dead', 'nopreview'):
+        check(f'video {id}: left alone', not vfilter(id), vfilter(id))
+    check('no video stuck hidden', vid.evaluate("[...document.querySelectorAll('shreddit-player')].every(p => [...p.shadowRoot.querySelectorAll('video')].every(v => v.style.visibility !== 'hidden'))"))
+    check('scrubber thumbnail left alone', vid.evaluate("[...document.querySelectorAll('shreddit-player')].every(p => !p.shadowRoot.querySelector('shreddit-preview-video-lazy').shadowRoot.querySelector('video').style.filter)"))
+    vid.screenshot(path=f'{work}/videos.png', full_page=True)
+
+    # Right-click override on a video
+    vid.bring_to_front()
+    def toggle():
+        vid.locator('#ui video').first.click(button='right')
+        vid.keyboard.press('Escape')
+        sw.evaluate("async () => { for (const t of await chrome.tabs.query({})) chrome.tabs.sendMessage(t.id, {type:'toggle-image'}).catch(()=>{}); }")
+        vid.wait_for_timeout(300)
+    toggle()
+    check('video override turns it off', not vfilter('ui'))
+    toggle()
+    check('video override turns it on', 'invert' in vfilter('ui'))
+
+    sw.evaluate("chrome.storage.local.set({settings:{reader:true, readerMode:'always', videos:false, uploader:true}, overrides:{}})")
+    vid.wait_for_timeout(300)
+    check('turning the setting off removes it', not vfilter('phone'))
+
     # Popup
     extid = sw.url.split('/')[2]
-    pop = ctx.new_page(); pop.set_viewport_size({'width': 300, 'height': 370}); pop.emulate_media(color_scheme='dark')
+    pop = ctx.new_page(); pop.set_viewport_size({'width': 300, 'height': 440}); pop.emulate_media(color_scheme='dark')
     pop.goto(f'chrome-extension://{extid}/popup/popup.html'); pop.wait_for_timeout(300)
     pop.screenshot(path=f'{work}/popup.png')
+    check('popup: checkbox starts unticked', not pop.locator('#videos').is_checked())
+    pop.locator('#videos').click(); pop.wait_for_timeout(100)
+    check('popup: checkbox saves', sw.evaluate("chrome.storage.local.get('settings')")['settings']['videos'] is True)
+    pop.screenshot(path=f'{work}/popup-on.png')
 
     ctx.close()
 print('\nFAILED:', fails if fails else 'none')

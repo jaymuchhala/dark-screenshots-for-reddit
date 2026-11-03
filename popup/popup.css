@@ -25,6 +25,8 @@ small { display: block; color: var(--muted); font-size: 12px; }
 .choices { padding: 8px 0 10px; border-bottom: 1px solid var(--line); }
 .choices label { display: flex; align-items: center; gap: 6px; padding: 2px 0; cursor: pointer; }
 .choices input { margin: 0; accent-color: var(--accent); }
+.choices .extra { margin-top: 6px; }
+.note { padding-left: 19px; }
 .choices.off { opacity: 0.45; pointer-events: none; }
 p { margin: 12px 0 0; padding-top: 10px; border-top: 1px solid var(--line); color: var(--muted); font-size: 12px; }
 .switch { appearance: none; flex: none; position: relative; width: 34px; height: 20px; margin: 0; border-radius: 10px; background: var(--off); cursor: pointer; transition: background-color 0.15s ease-out; }

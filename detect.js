@@ -38,6 +38,58 @@ function isLightScreenshot({ light, tinted, flat, colorful }, allowTinted) {
   return (allowTinted ? tinted : light) >= 0.5 && flat >= 0.55 && colorful <= (allowTinted ? 0.25 : 0.15);
 }
 
+// Video previews are tiny (about 170x96), so text blurs and less of a frame is flat.
+function isLightVideoFrame({ light, flat, colorful }) {
+  return light >= 0.55 && flat >= 0.4 && colorful <= 0.15;
+}
+
+const VIDEO_SAMPLES = 5;
+const VIDEO_TIMEOUT_MS = 15000;
+
+// Page only: the worker has no video element. Samples frames across the whole video,
+// because a poster or a single frame can be a white title card on real-life footage.
+// One frame may differ, for an intro or an outro.
+async function isLightVideo(url) {
+  const video = document.createElement('video');
+  video.crossOrigin = 'anonymous';
+  video.muted = true;
+  video.preload = 'auto';
+  const reached = (event) => new Promise((resolve, reject) => {
+    video.addEventListener(event, resolve, { once: true });
+    video.addEventListener('error', reject, { once: true });
+  });
+  const sample = async () => {
+    const ready = reached('loadedmetadata');
+    video.src = url;
+    await ready;
+    if (!Number.isFinite(video.duration) || !video.videoWidth) return false;
+    const scale = Math.min(1, SAMPLE_SIZE / Math.max(video.videoWidth, video.videoHeight));
+    const w = Math.max(1, Math.round(video.videoWidth * scale));
+    const h = Math.max(1, Math.round(video.videoHeight * scale));
+    const ctx = new OffscreenCanvas(w, h).getContext('2d', { willReadFrequently: true });
+    let hits = 0;
+    for (let i = 0; i < VIDEO_SAMPLES; i++) {
+      const seeked = reached('seeked');
+      video.currentTime = video.duration * (i + 0.5) / VIDEO_SAMPLES;
+      await seeked;
+      ctx.drawImage(video, 0, 0, w, h);
+      if (isLightVideoFrame(measure(ctx.getImageData(0, 0, w, h).data, w, h))) hits++;
+    }
+    return hits >= VIDEO_SAMPLES - 1;
+  };
+  let timer;
+  try {
+    return await Promise.race([
+      sample(),
+      new Promise((_, reject) => { timer = setTimeout(reject, VIDEO_TIMEOUT_MS); }),
+    ]);
+  } finally {
+    clearTimeout(timer);
+    video.removeAttribute('src');
+    video.load();
+  }
+}
+
 async function analyzeBlob(blob) {
   const bitmap = await createImageBitmap(blob);
   const scale = Math.min(1, SAMPLE_SIZE / Math.max(bitmap.width, bitmap.height));
