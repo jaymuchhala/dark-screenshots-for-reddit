@@ -184,7 +184,10 @@ with sync_playwright() as p:
     shutil.copy(f'{site}/shot2.png', f'{site}/slow.png')
     page.evaluate("""() => { const b=document.createElement('div'); b.id='box'; b.style.cssText='height:20px'; const i=new Image(); i.id='late'; i.style.cssText='width:300px;height:100%'; b.append(i); document.body.append(b); i.src='/slow.png'; i.addEventListener('load', () => { b.style.height='200px'; }, {once:true}); }""")
     page.locator('#box').evaluate('el => el.scrollIntoView()')
-    page.wait_for_timeout(1500)
+    # Three slow requests: the page's, the check's, and the full size for partial darkening.
+    for _ in range(80):
+        if 'invert' in page.locator('#late').evaluate(FILTERED): break
+        page.wait_for_timeout(100)
     check('sized after load: not hidden', page.locator('#late').evaluate("el => el.style.visibility") == '')
     check('sized after load: darkened', 'invert' in page.locator('#late').evaluate(FILTERED))
 
