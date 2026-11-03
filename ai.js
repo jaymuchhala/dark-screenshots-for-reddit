@@ -12,6 +12,7 @@ const NANO_OPTS = {
   expectedInputs: [{ type: 'image' }, { type: 'text', languages: ['en'] }],
   expectedOutputs: [{ type: 'text', languages: ['en'] }],
 };
+const AI_RELEASE_MS = 120000;   // a loaded model holds gigabytes of memory, so it goes when not in use
 const AI_SCHEMA = { type: 'object', properties: { screen: { enum: ['yes', 'no'] } }, required: ['screen'] };
 
 // unsupported | unavailable | downloadable | downloading | available
@@ -54,9 +55,20 @@ async function pickEngine(choice) {
 }
 
 let nanoBase = null;
+let nanoRelease = null;
+function releaseNanoLater() {
+  clearTimeout(nanoRelease);
+  nanoRelease = setTimeout(async () => {
+    const base = nanoBase;
+    nanoBase = null;
+    (await base)?.destroy();
+  }, AI_RELEASE_MS);
+}
+
 async function askNano(blob, signal) {
   // Creating the session is the slow part, so one stays loaded and each image gets a copy.
   nanoBase ??= LanguageModel.create(NANO_OPTS).catch((e) => { nanoBase = null; throw e; });
+  clearTimeout(nanoRelease);
   const session = await (await nanoBase).clone();
   signal.addEventListener('abort', () => session.destroy());
   try {
@@ -66,6 +78,7 @@ async function askNano(blob, signal) {
     );
   } finally {
     session.destroy();
+    releaseNanoLater();
   }
 }
 
@@ -77,6 +90,7 @@ async function askOllama(dataUrl, model, signal) {
       model,
       stream: false,
       format: 'json',
+      keep_alive: `${AI_RELEASE_MS / 1000}s`,
       options: { temperature: 0, num_predict: 20 },
       messages: [{ role: 'user', content: AI_PROMPT, images: [dataUrl.split(',')[1]] }],
     }),

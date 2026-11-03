@@ -1,4 +1,4 @@
-const DEFAULTS = { reader: true, readerMode: 'theme', videos: false, frames: true, uploader: true, tinted: true, aiEngine: 'auto' };
+const DEFAULTS = { reader: true, readerMode: 'theme', videos: false, frames: true, uploader: true, tinted: true, aiEngine: 'off' };
 const reader = document.getElementById('reader');
 const videos = document.getElementById('videos');
 const frames = document.getElementById('frames');

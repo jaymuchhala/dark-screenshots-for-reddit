@@ -593,11 +593,14 @@ with sync_playwright() as p:
 
     if want('ai'):
         # The AI check, on copies of the screenshots so nothing else has a verdict on them.
-        for i in range(1, 9): shutil.copy(f'{site}/shot1.png', f'{site}/ai{i}.png')
+        for i in range(1, 16): shutil.copy(f'{site}/shot1.png', f'{site}/ai{i}.png')
         ALWAYS = "reader:true, readerMode:'always', uploader:true, tinted:true"
         def ai_settings(engine):
             sw.evaluate("e => chrome.storage.local.set({settings:{" + ALWAYS + ", aiEngine:e}}).then(() => { aiPickedAt = 0; })", engine)
+        def ai_rest_over(): sw.evaluate("chrome.storage.session.remove('aiRestUntil')")
+        def ai_filter(pg): return pg.evaluate("document.getElementById('t').style.filter")
         def ai_page(name):
+            ai_rest_over()
             pg = ctx.new_page(); pg.goto(base + '/index.html')
             pg.evaluate("n => { const i = new Image(); i.src = '/' + n; i.id = 't'; i.style.cssText = 'width:300px;height:200px'; document.body.prepend(i); }", name)
             return pg
@@ -615,8 +618,8 @@ with sync_playwright() as p:
         ai_settings('auto')
         pg = ai_page('ai2.png')
         pg.wait_for_timeout(3000)
-        check('ai: held past the usual reveal while asking', not ai_shown(pg))
-        check('ai: no means no darkening', not ai_dark(pg))
+        check('ai: dark at once, not held while asking', ai_shown(pg) and 'invert' in ai_filter(pg))
+        check('ai: no undoes the darkening', lambda: 'invert' not in ai_filter(pg))
         check('ai: asked once, with an image, the smallest vision model', fake_ollama['asked'] == 1 and fake_ollama['images'] == 1 and fake_ollama['model'] == 'seer', fake_ollama)
         pg.close()
         pg = ai_page('ai2.png')
@@ -624,7 +627,10 @@ with sync_playwright() as p:
         check('ai: saved answer needs no new call', fake_ollama['asked'] == 1); pg.close()
 
         fake_ollama.update(answer='yes', delay=0)
+        n = fake_ollama['asked']
         pg = ai_page('ai3.png')
+        until(lambda: fake_ollama['asked'] == n + 1, 8000)
+        pg.wait_for_timeout(300)
         check('ai: yes darkens', ai_dark(pg))
         check('ai: photos are never sent', (lambda n: ([ai_page('photo-Sonoma.jpg').wait_for_timeout(1500)], fake_ollama['asked'] == n)[1])(fake_ollama['asked'])); pg.close()
 
@@ -641,13 +647,60 @@ with sync_playwright() as p:
         check('ai: off ignores saved answers', ai_dark(pg2))
         check('ai: off asks nothing', fake_ollama['asked'] == n); pg.close(); pg2.close()
 
+        # Off unless chosen
+        sw.evaluate("chrome.storage.local.set({settings:{" + ALWAYS + "}}).then(() => { aiPickedAt = 0; })")
+        n = fake_ollama['asked']
+        pg = ai_page('ai9.png')
+        check('ai: not set, it stays off', ai_dark(pg) and (pg.wait_for_timeout(2000) or fake_ollama['asked'] == n)); pg.close()
+
+        # Only while the page is still, only what's on screen, with rests between
+        fake_ollama.update(answer='no', delay=0)
+        ai_settings('auto')
+        n = fake_ollama['asked']
+        pg = ai_page('ai10.png')
+        pg.wait_for_timeout(500)
+        for _ in range(10):
+            pg.evaluate("dispatchEvent(new Event('scroll'))"); pg.wait_for_timeout(300)
+        check('ai: nothing asked while the page moves', fake_ollama['asked'] == n and 'invert' in ai_filter(pg))
+        check('ai: asked once the page is still', lambda: fake_ollama['asked'] == n + 1 and 'invert' not in ai_filter(pg)); pg.close()
+
+        n = fake_ollama['asked']
+        ai_rest_over()
+        pg = ctx.new_page(); pg.goto(base + '/index.html')
+        pg.evaluate("() => { const i = new Image(); i.src = '/ai11.png'; i.id = 't'; i.style.cssText = 'display:block;width:300px;height:200px;margin-top:' + (innerHeight + 100) + 'px'; document.body.prepend(i); }")
+        pg.wait_for_timeout(2500)
+        check('ai: an image near the view but off screen waits', fake_ollama['asked'] == n and 'invert' in ai_filter(pg))
+        pg.evaluate("scrollTo(0, innerHeight)")
+        check('ai: asked once on screen', lambda: fake_ollama['asked'] == n + 1); pg.close()
+
+        n = fake_ollama['asked']
+        sw.evaluate("chrome.storage.session.set({aiRestUntil: Date.now() + 3500})")
+        pg = ctx.new_page(); pg.goto(base + '/index.html')
+        pg.evaluate("() => { const i = new Image(); i.src = '/ai12.png'; i.id = 't'; i.style.cssText = 'width:300px;height:200px'; document.body.prepend(i); }")
+        pg.wait_for_timeout(2500)
+        check('ai: the model rests between calls', fake_ollama['asked'] == n)
+        check('ai: asked after the rest', lambda: fake_ollama['asked'] == n + 1); pg.close()
+
+        fake_ollama.update(delay=2)
+        n = fake_ollama['asked']
+        pg = ai_page('ai13.png')
+        until(lambda: fake_ollama['asked'] == n + 1, 8000)
+        pg.evaluate("dispatchEvent(new Event('scroll'))")
+        pg.wait_for_timeout(2500)
+        check('ai: moving drops the running call', 'invert' in ai_filter(pg) and 'ai13' not in str(sw.evaluate("chrome.storage.local.get('aiAnswers')")))
+        check('ai: a rest follows it', sw.evaluate("chrome.storage.session.get('aiRestUntil')").get('aiRestUntil', 0) > 0)
+        fake_ollama.update(delay=0)
+        ai_rest_over()
+        check('ai: asked again once still', lambda: fake_ollama['asked'] == n + 2 and 'invert' not in ai_filter(pg)); pg.close()
+        fake_ollama.update(answer='no')
+
         # Chrome's built-in model
         fake_ollama.update(up=False)
         fake_ollama.update(nano='no')
         ai_settings('auto')
         pg = ai_page('ai6.png')
-        check('ai: Chrome engine vetoes when Ollama is away', not ai_dark(pg))
-        check('ai: Chrome engine got the image', fake_ollama.get('nano_got_image') is True); pg.close()
+        check('ai: Chrome engine got the image', lambda: fake_ollama.get('nano_got_image') is True)
+        check('ai: Chrome engine vetoes when Ollama is away', lambda: 'invert' not in ai_filter(pg)); pg.close()
         fake_ollama.update(nano=None)
 
         # Upload: a no leaves the file as it is
@@ -673,6 +726,7 @@ with sync_playwright() as p:
         sw.evaluate("chrome.storage.local.set({settings:{" + ALWAYS + ", videos:true, aiEngine:'auto'}}).then(() => { aiPickedAt = 0; })")
         vp = ctx.new_page(); vp.goto(base + '/index.html')
         def ai_player(id, clip):
+            ai_rest_over()
             vp.evaluate("""([id, clip, media]) => {
               const p = document.createElement('shreddit-player'); p.id = id; p.style.cssText = 'display:block;width:300px;height:170px';
               p.setAttribute('preview', `${media}/${clip}`);
@@ -683,9 +737,8 @@ with sync_playwright() as p:
         def ai_video_filter(id): return vp.evaluate("id => document.getElementById(id).shadowRoot.querySelector('video').style.filter", id)
         n = fake_ollama['asked']
         ai_player('no', 'vid-ui.webm')
-        until(lambda: fake_ollama['asked'] > n and not vp.evaluate("document.getElementById('no').hasAttribute('data-applying-dark')"), 15000)
-        vp.wait_for_timeout(500)
-        check('ai: a video stays as it is on a no', 'invert' not in ai_video_filter('no') and fake_ollama['images'] > 0)
+        until(lambda: fake_ollama['asked'] > n, 15000)
+        check('ai: a video goes back on a no', lambda: 'invert' not in ai_video_filter('no') and fake_ollama['images'] > 0)
         fake_ollama.update(answer='yes')
         ai_player('yes', 'vid-ui2.webm')
         check('ai: a video darkens on a yes', lambda: 'invert' in ai_video_filter('yes'))

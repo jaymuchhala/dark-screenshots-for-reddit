@@ -9,7 +9,7 @@
   const MAX_VIDEO_CHECKS = 2;
   const PLAYER_TRIES = 100, PLAYER_RETRY_MS = 100;
   const VIDEO_REVEAL_AFTER_MS = 6000;
-  const AI_HOLD_MS = 45000;
+  const AI_STILL_MS = 1500;     // how long the page has to be still before the AI check runs
   const AI_UPLOAD_WAIT_MS = 30000;
   const PARTS = 'parts';
   const PARTS_CHECK_MS = 100;
@@ -28,7 +28,7 @@
   // ---------- Reader: darken screenshots already on the page ----------
 
   const verdicts = new Map();   // image key -> pixel stats or null, or a promise while checking
-  const asking = new Map();     // image key -> when to stop holding it for the AI check
+  const aiWaiting = new Map();  // image key -> { ask, veto } for the AI check, once the page is still
   const tracked = new Map();    // img -> { hidden, darkened, filter, held }
   const players = new Map();    // video player -> { hidden, held, timer, expired }
   const partVideos = new Map(); // video darkened in parts -> { ready, stop }
@@ -451,59 +451,99 @@
     const check = img.localName !== 'img'
       ? videoVerdict(key, url, img)
       : chrome.runtime.sendMessage({ type: 'check-image', key, url: smallestUrl(img, url), fullUrl: largestUrl(img, url) })
-        .then((stats) => stats?.askAi && !(key in overrides) ? askAboutImage(key, stats, largestUrl(img, url)) : stats);
-    const pending = check
-      .catch(() => null)
-      .then((result) => {
-        verdicts.set(key, result || null);
-        for (const other of tracked.keys()) render(other);
-        for (const player of players.keys()) updatePlayer(player);
-      });
+        .then((stats) => imageVerdict(key, stats, largestUrl(img, url)));
+    const pending = check.catch(() => null).then((result) => settleVerdict(key, result));
     verdicts.set(key, pending);
     return pending;
   }
 
-  // The AI check has the last word on what the pixel checks would darken. The image stays
-  // held meanwhile, unless the queue is very long. No answer leaves the verdict as it is.
-  async function askAi(key, message) {
-    asking.set(key, Date.now() + AI_HOLD_MS);
-    try {
-      return await chrome.runtime.sendMessage({ type: 'ask-ai', ...message });
-    } catch {
-      return null;
-    } finally {
-      asking.delete(key);
-    }
+  function settleVerdict(key, result) {
+    verdicts.set(key, result || null);
+    for (const other of tracked.keys()) render(other);
+    for (const player of players.keys()) updatePlayer(player);
   }
 
-  async function askAboutImage(key, stats, url) {
-    if (await askAi(key, { key, url }) !== false) return stats;
-    return { ...stats, photo: 1, partial: null, vetoedPartial: stats.partial };
+  // ---------- The AI check, which can undo a darkening once the page is still ----------
+
+  // The model fills the GPU that also scrolls the page, so nothing waits on it: the pixel checks'
+  // verdict shows at once, and the model only looks at what's on screen after the page has been
+  // still for a while. Any movement stops it. A saved answer applies straight away.
+  function imageVerdict(key, stats, url) {
+    if (!stats || key in overrides) return stats;
+    const veto = () => ({ ...stats, photo: 1, partial: null, vetoedPartial: stats.partial });
+    if (stats.ai === false) return veto();
+    if (stats.ai === 'ask') askWhenStill(key, () => askAi({ key, url }), veto);
+    return stats;
   }
 
   // What's saved is the pixel checks' verdict, so the AI check can change its mind on it later.
   async function videoVerdict(key, url, player) {
     const pixels = key in savedVideos ? savedVideos[key] : await withVideoSlot(() => checkVideo(url, largerUrl(playerOf(player))));
     if (pixels !== null && !(key in savedVideos)) saveVideoVerdict(key, pixels);
-    return pixels === true ? askAboutVideo(key, player) : pixels;
+    if (pixels !== true) return pixels;
+    const known = await chrome.runtime.sendMessage({ type: 'ai-known', key }).catch(() => null);
+    if (known === 'ask') askWhenStill(key, () => askAboutVideo(key, player), () => null);
+    return known !== false;
   }
 
   async function askAboutVideo(key, player) {
-    const known = await chrome.runtime.sendMessage({ type: 'ai-known', key }).catch(() => null);
-    if (known !== 'ask') return known !== false;
+    const moves = aiMoves;
     const url = largerUrl(playerOf(player));
     const image = url && await aiVideoFrame(url);
-    if (!image) return true;
-    return await askAi(key, { key, image }) !== false;
+    if (!image) return null;
+    return moves === aiMoves ? askAi({ key, image }) : 'cancelled';
   }
 
-  // Reveals after a while, or once the AI check is done with the image.
-  function revealLater(url, ms, reveal) {
-    setTimeout(() => {
-      if (url && asking.get(imageKey(url)) > Date.now()) revealLater(url, 500, reveal);
-      else reveal();
-    }, ms);
+  const askAi = (message) => chrome.runtime.sendMessage({ type: 'ask-ai', ...message }).catch(() => 'cancelled');
+
+  let aiTimer = null;
+  let aiAsking = false;
+  let aiMoves = 0;
+
+  function askWhenStill(key, ask, veto) {
+    aiWaiting.set(key, { ask, veto });
+    if (!aiTimer && !aiAsking) askLater(AI_STILL_MS);
   }
+
+  function askLater(ms) {
+    clearTimeout(aiTimer);
+    aiTimer = aiWaiting.size ? setTimeout(askNext, ms) : null;
+  }
+
+  function aiKeyOnScreen() {
+    for (const el of [...tracked.keys(), ...players.keys()]) {
+      if (!el.isConnected) continue;
+      const box = el.getBoundingClientRect();
+      if (!box.width || box.bottom < 0 || box.top > innerHeight) continue;
+      const url = el.localName === 'img' || el.localName === 'video' ? imageUrl(el) : playerUrl(el);
+      const key = url && imageKey(url);
+      if (aiWaiting.has(key)) return key;
+    }
+    return null;
+  }
+
+  async function askNext() {
+    aiTimer = null;
+    if (aiAsking || document.hidden || !chrome.runtime?.id) return;
+    const key = aiKeyOnScreen();
+    if (!key) return;
+    const job = aiWaiting.get(key);
+    aiAsking = true;
+    const said = await job.ask();
+    aiAsking = false;
+    if (said?.restMs) return askLater(said.restMs);
+    if (said !== 'cancelled') aiWaiting.delete(key);
+    if (said === false) settleVerdict(key, job.veto());
+    askLater(AI_STILL_MS);
+  }
+
+  function pageMoved() {
+    aiMoves++;
+    if (aiAsking) chrome.runtime.sendMessage({ type: 'ai-cancel' }).catch(() => {});
+    askLater(AI_STILL_MS);
+  }
+  for (const type of ['scroll', 'wheel', 'keydown']) window.addEventListener(type, pageMoved, { capture: true, passive: true });
+  document.addEventListener('visibilitychange', pageMoved);
 
   function saveVideoVerdict(key, verdict) {
     savedVideos[key] = verdict;
@@ -520,10 +560,10 @@
         if (!held.hidden) continue;
         if (!held.timer) {
           held.timer = true;
-          revealLater(playerUrl(img), VIDEO_REVEAL_AFTER_MS, () => {
+          setTimeout(() => {
             held.expired = true;
             updatePlayer(img);
-          });
+          }, VIDEO_REVEAL_AFTER_MS);
         }
         if (readerActive(img)) checkVerdict(img, playerUrl(img));
         continue;
@@ -540,7 +580,7 @@
         if (url && img.localName === 'img' && overrides[imageKey(url)] && chrome.runtime?.id) checkVerdict(img, url);
         continue;
       }
-      revealLater(url, img.localName === 'video' ? VIDEO_REVEAL_AFTER_MS : REVEAL_AFTER_MS, () => setHidden(img, state, false));
+      setTimeout(() => setHidden(img, state, false), img.localName === 'video' ? VIDEO_REVEAL_AFTER_MS : REVEAL_AFTER_MS);
       checkVerdict(img, url);
     }
   }, { rootMargin: '600px' });
@@ -695,7 +735,7 @@
 
   // The upload can't wait as long as an image on the page can.
   async function isAiVeto(file) {
-    if (settings.aiEngine === 'off') return false;
+    if ((settings.aiEngine ?? 'off') === 'off') return false;
     const ask = chrome.runtime.sendMessage({ type: 'ask-ai', image: await aiImage(file) });
     const late = new Promise((resolve) => setTimeout(resolve, AI_UPLOAD_WAIT_MS, null));
     return await Promise.race([ask, late]) === false;

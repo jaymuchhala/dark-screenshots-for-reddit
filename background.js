@@ -2,7 +2,10 @@ importScripts('detect.js');
 
 const IMAGE_HOSTS = new Set(['i.redd.it', 'preview.redd.it', 'external-preview.redd.it']);
 const MAX_FETCHES = 4;
-const AI_TIMEOUT_MS = 60000;
+const AI_TIMEOUT_MS = 30000;
+const AI_REST_FACTOR = 6;      // after each call the model rests 6 times as long, so it's busy 1/7 of the time at most
+const AI_REST_MIN_MS = 3000;
+const AI_REST_MAX_MS = 90000;
 const AI_PICK_MS = 30000;      // how long to trust which engine is ready
 const AI_VERSION = 1;          // raise when the prompt changes, so old answers go
 const MAX_AI_ANSWERS = 2000;
@@ -26,7 +29,7 @@ async function checkImage(url, fullUrl, key) {
   if (!allowedImage(url)) return null;
   const stats = await inspectImage(url, fullUrl);
   if (!stats || !(stats.partial || isLightScreenshot(stats, (await readSettings()).tinted ?? true))) return stats;
-  stats.askAi = await aiCanAnswer(key);
+  stats.ai = await aiKnown(key).catch(() => null);
   return stats;
 }
 
@@ -84,7 +87,7 @@ async function toOffscreen(msg) {
 let aiPicked = null;
 let aiPickedAt = 0;
 async function aiPick() {
-  const choice = (await readSettings()).aiEngine ?? 'auto';
+  const choice = (await readSettings()).aiEngine ?? 'off';
   if (choice === 'off') return null;
   if (Date.now() - aiPickedAt > AI_PICK_MS) {
     aiPicked = await toOffscreen({ type: 'ai-pick', choice });
@@ -110,7 +113,7 @@ chrome.storage.onChanged.addListener((changes) => {
 
 async function aiCanAnswer(key) {
   try {
-    if ((await readSettings()).aiEngine === 'off') return false;
+    if (((await readSettings()).aiEngine ?? 'off') === 'off') return false;
     return key in await loadAnswers() || !!await aiPick();
   } catch {
     return false;
@@ -124,32 +127,54 @@ async function aiKnown(key) {
   return key in answers ? answers[key] : 'ask';
 }
 
-// One at a time, newest first, since the newest images are the ones in view.
+// One at a time, newest first.
 const aiQueue = [];
-let aiBusy = false;
+let aiRunning = null;
 function nextAiJob() {
-  if (aiBusy || !aiQueue.length) return;
-  aiBusy = true;
-  aiQueue.pop()().finally(() => {
-    aiBusy = false;
+  if (aiRunning || !aiQueue.length) return;
+  aiRunning = aiQueue.pop();
+  aiRunning.run().finally(() => {
+    aiRunning = null;
     nextAiJob();
   });
 }
 
-// True if the image is a screen, false if not, null if there's no answer. An image comes
-// as a data URL, or as a url to fetch.
-function askAi({ key, url, image }) {
+// The page in that tab moved, so its model calls make way. Uploads stay.
+function cancelAi(tab) {
+  for (let i = aiQueue.length - 1; i >= 0; i--) {
+    if (aiQueue[i].tab === tab) aiQueue.splice(i, 1)[0].resolve('cancelled');
+  }
+  if (aiRunning?.tab !== tab) return;
+  aiRunning.cancelled = true;
+  aiRunning.resolve('cancelled');
+  toOffscreen({ type: 'ai-cancel' }).catch(() => {});
+}
+
+// True if the image is a screen, false if not, null if there's no answer, 'cancelled' if the
+// page moved, or { restMs } if the model is resting. An image comes as a data URL, or as a url
+// to fetch. Images on the page have a key and wait out the rest; an upload is someone waiting.
+function askAi({ key, url, image }, tab) {
   return new Promise((resolve) => {
-    aiQueue.push(async () => {
+    const job = { tab: key ? tab : null, resolve, cancelled: false };
+    aiQueue.push(job);
+    job.run = async () => {
+      if (job.cancelled) return;
       try {
         const answers = await loadAnswers();
         if (key && key in answers) return resolve(answers[key]);
         const pick = await aiPick();
         if (!pick) return resolve(null);
+        if (key) {
+          const { aiRestUntil = 0 } = await chrome.storage.session.get('aiRestUntil');
+          if (aiRestUntil > Date.now()) return resolve({ restMs: aiRestUntil - Date.now() });
+        }
         if (url && !allowedImage(url)) return resolve(null);
         const sent = image || await aiImage(await (await fetch(url, { credentials: 'omit' })).blob());
+        const started = Date.now();
         const screen = await toOffscreen({ type: 'ai-ask', pick, image: sent, timeoutMs: AI_TIMEOUT_MS });
-        if (screen === null) aiPickedAt = 0;
+        const restMs = Math.max(AI_REST_MIN_MS, Math.min(AI_REST_MAX_MS, (Date.now() - started) * AI_REST_FACTOR));
+        await chrome.storage.session.set({ aiRestUntil: Date.now() + restMs });
+        if (screen === null) { if (!job.cancelled) aiPickedAt = 0; }
         else if (key) {
           answers[key] = screen;
           const keys = Object.keys(answers);
@@ -161,7 +186,7 @@ function askAi({ key, url, image }) {
         aiPickedAt = 0;
         resolve(null);
       }
-    });
+    };
     nextAiJob();
   });
 }
@@ -189,9 +214,10 @@ chrome.runtime.onMessage.addListener((msg, sender, reply) => {
     return true;
   }
   if (msg.type === 'ask-ai') {
-    askAi(msg).then(reply);
+    askAi(msg, sender.tab?.id).then(reply);
     return true;
   }
+  if (msg.type === 'ai-cancel') cancelAi(sender.tab?.id);
   if (msg.type !== 'check-image') return;
   checkImage(msg.url, msg.fullUrl, msg.key).then(reply, () => reply(null));
   return true;
