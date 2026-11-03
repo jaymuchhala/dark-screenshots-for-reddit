@@ -129,6 +129,8 @@ MAKE = """async () => {
     mk('neg-red-heatmap.png', 1100, 600, (x,w,h)=>{ x.fillStyle='#000'; x.fillRect(0,0,w,h); for(let i=0;i<30;i++) for(let j=0;j<16;j++){ x.fillStyle='#7f1820'; x.fillRect(i*37+1,j*37+1,35,35); x.fillStyle='#eee'; x.fillRect(i*37+12,j*37+12,12,12); } }),
     mk('neg-white-sky.jpg', 900, 600, (x,w,h)=>{ x.fillStyle='#fff'; x.fillRect(0,0,w,h); noise(x,0,330,900,270,[90,110,70]); }, 'image/jpeg'),
     ...[['partial-photos.png', true], ['partial-strict.png', false], ['partial-cream.png', false, '#feecdc']].map(([name, photos, page]) => mk(name, 1200, 800, (x,w,h)=>{ x.fillStyle=page||'#fff'; x.fillRect(0,0,w,h); x.fillStyle='#222'; x.font='18px sans-serif'; for(let i=0;i<26;i++) x.fillText('Lorem ipsum dolor sit amet, consectetur adipiscing elit',30,430+i*14+(i%2)); if(photos){ noise(x,30,30,400,330,[150,130,110]); noise(x,460,30,400,330,[120,140,150]); } x.fillStyle='#14202e'; x.fillRect(900,60,270,photos?360:300); x.fillStyle='#eee'; for(let i=0;i<9;i++) x.fillText('Panel row '+i,920,100+i*30); })),
+    mk('card-video.png', 900, 600, (x,w,h)=>{ x.fillStyle='#fff'; x.fillRect(0,0,w,h); noise(x,6,6,888,490,[205,205,212]); x.fillStyle='#a33'; x.fillRect(100,100,150,300); for(const [cx,cy] of [[6,6],[893,6],[6,495],[893,495]]) x.clearRect(cx,cy,1,1); noise(x,20,520,60,60,[150,130,110]); x.fillStyle='#111'; x.font='600 32px sans-serif'; x.fillText('I Tested Viral Clickbait Recipes',110,555); }),
+    mk('neg-bordered.png', 900, 600, (x,w,h)=>{ x.fillStyle='#fff'; x.fillRect(0,0,w,h); noise(x,20,20,860,560,[150,130,110]); }),
     mk('frame-dark.png', 1200, 800, (x,w,h)=>{ x.fillStyle='#ecece4'; x.fillRect(0,0,w,h); x.fillStyle='#333'; x.font='18px sans-serif'; x.fillText('IMAGE 01',50,30); x.fillStyle='#111'; x.fillRect(50,45,1100,330); x.fillStyle='#333'; x.fillText('IMAGE 02',50,405); x.fillStyle='#111'; x.fillRect(50,420,1100,340); x.fillStyle='#ddd'; x.fillText('Dark panel text',100,120); }),
     mk('neg-caption-bars.png', 1200, 800, (x,w,h)=>{ x.fillStyle='#fff'; x.fillRect(0,0,w,h); x.fillStyle='#111'; x.fillRect(0,110,w,580); x.font='40px sans-serif'; x.fillText('top text',60,70); x.fillText('bottom text',60,760); }),
     mk('partial-lines.png', 1200, 800, (x,w,h)=>{ x.fillStyle='#fff'; x.fillRect(0,0,w,h); x.fillStyle='#222'; x.font='18px sans-serif'; for(let i=0;i<26;i++) x.fillText('Lorem ipsum dolor sit amet, consectetur adipiscing elit',30,430+i*14+(i%2)); noise(x,30,30,400,330,[150,130,110]); noise(x,460,30,400,330,[120,140,150]); x.fillStyle='#14202e'; x.fillRect(900,60,270,360); x.strokeStyle='#888'; x.lineWidth=2; x.strokeRect(10,10,1180,780); for(const y of [20,200,395]){ x.beginPath(); x.moveTo(10,y); x.lineTo(1190,y); x.stroke(); } }),
@@ -218,7 +220,14 @@ with sync_playwright() as p:
             check(f'{f}: page darkened', max(px(f, .4, .97)) < 60, px(f, .4, .97))
             check(f'{f}: panel stays dark', px(f, .96, .4)[2] < 80 and px(f, .96, .4)[0] < 60, px(f, .96, .4))
         check('photo stays as it is', 90 < sum(px('partial-photos.png', .2, .25)) / 3 < 200, px('partial-photos.png', .2, .25))
-        for f in ('neg-product.jpg', 'neg-meme.jpg', 'neg-white-sky.jpg', 'neg-dark-ui.png'):
+        # A video's card: the strip goes dark, the picture stays whole however pale it is
+        card = page.locator('img[alt="card-video.png"]')
+        card.scroll_into_view_if_needed()
+        check('card: partly dark, no filter', lambda: 'url("data:image/webp' in card.evaluate("el => el.style.content") and not card.evaluate(FILTERED))
+        check('card: strip darkened', max(px('card-video.png', .9, .9)) < 60, px('card-video.png', .9, .9))
+        check('card: pale picture stays', min(px('card-video.png', .6, .4)) > 150, px('card-video.png', .6, .4))
+        check('card: avatar stays', 90 < sum(px('card-video.png', 50/900, 550/600)) / 3 < 200, px('card-video.png', 50/900, 550/600))
+        for f in ('neg-product.jpg', 'neg-meme.jpg', 'neg-white-sky.jpg', 'neg-dark-ui.png', 'neg-bordered.png'):
             check(f'{f}: not partly dark', not page.locator(f'img[alt="{f}"]').evaluate("el => el.style.content"))
         for f in ('around-blur.png', 'around-bar.png'):
             el = page.locator(f'img[alt="{f}"]')
@@ -601,6 +610,9 @@ with sync_playwright() as p:
         until(lambda: p.evaluate("document.getElementById('x').complete && !document.getElementById('x').style.objectPosition"), 8000)
         p.wait_for_timeout(300)
         check('model: a no leaves an image bright', not darkened(p))
+        p.close()
+        p = ai_page('card-video')
+        check('model: a no leaves a card darkened', lambda: 'url(' in p.evaluate("document.getElementById('x').style.content"))
         p.close()
 
         # No answer: the pixel checks decide

@@ -357,9 +357,14 @@ function pageMask(data, width, height) {
   }
   for (let i = 0; i < n; i++) share += mask[i];
   // Text and icons on the page are what separate a screenshot from a product on white.
-  const small = other.slice(), glyphs = [];
+  const small = other.slice();
   for (let i = 0; i < n; i++) if (keep[i]) small[i] = 0;
-  eachGroup(small, width, queue, (start, end) => {
+  return { mask, share: share / n, ink: ink / page, lines: textLines(glyphBoxes(small, width, height, queue), height) };
+}
+
+function glyphBoxes(want, width, height, queue) {
+  const glyphs = [];
+  eachGroup(want, width, queue, (start, end) => {
     let x0 = width, x1 = 0, y0 = height, y1 = 0;
     for (let i = start; i < end; i++) {
       const x = queue[i] % width, y = (queue[i] - x) / width;
@@ -370,8 +375,105 @@ function pageMask(data, width, height) {
     }
     glyphs.push({ x0, x1, h: y1 - y0 + 1, cy: (y0 + y1) / 2 });
   });
-  return { mask, share: share / n, ink: ink / page, lines: textLines(glyphs, height) };
+  return glyphs;
 }
+
+// One big picture on a pale card with a line of text beside it: a screenshot of a YouTube
+// video. The picture can be as pale as the page and run into it, so pageMask would bite
+// into it. Here the card has one exact color and the picture is one rectangle, kept whole.
+const CARD_MIN_FLAT = 0.05;
+const CARD_MIN_PICTURE = 0.35;
+const CARD_MIN_PAGE = 0.7;
+const CARD_COLOR_RANGE = 8;
+
+function mayBeCard(stats) {
+  return stats.sides >= 3 && stats.dark < FRAME_MIN_DARK && stats.tinted < PARTIAL_MIN_LIGHT && stats.flatPage >= CARD_MIN_FLAT;
+}
+
+function cardMask(data, width, height) {
+  const n = width * height;
+  const counts = new Map();
+  const count = (c) => {
+    const key = (data[c * 4] >> 2) << 12 | (data[c * 4 + 1] >> 2) << 6 | data[c * 4 + 2] >> 2;
+    counts.set(key, (counts.get(key) || 0) + 1);
+  };
+  for (let x = 0; x < width; x++) { count(x); count(n - width + x); }
+  for (let y = 0; y < height; y++) { count(y * width); count(y * width + width - 1); }
+  const key = [...counts].sort((a, b) => b[1] - a[1])[0][0];
+  const r = (key >> 12) * 4 + 2, g = ((key >> 6) & 63) * 4 + 2, b = (key & 63) * 4 + 2;
+  if (0.299 * r + 0.587 * g + 0.114 * b < 205) return null;
+  const onPage = new Uint8Array(n);
+  for (let i = 0; i < n; i++) {
+    onPage[i] = Math.abs(data[i * 4] - r) <= CARD_COLOR_RANGE && Math.abs(data[i * 4 + 1] - g) <= CARD_COLOR_RANGE && Math.abs(data[i * 4 + 2] - b) <= CARD_COLOR_RANGE ? 1 : 0;
+  }
+  // The picture's rows have a long unbroken stretch off the page. A line of text has gaps.
+  let y0 = -1, y1 = -1, from = -1, last = -1;
+  const maxGap = Math.ceil(height * 0.02);
+  for (let y = 0; y < height; y++) {
+    let run = 0, best = 0;
+    for (let x = 0; x < width; x++) {
+      run = onPage[y * width + x] ? 0 : run + 1;
+      if (run > best) best = run;
+    }
+    if (best < width * 0.3) continue;
+    if (from < 0 || y - last > maxGap) from = y;
+    last = y;
+    if (last - from > y1 - y0) { y0 = from; y1 = last; }
+  }
+  if (y0 < 0) return null;
+  let x0 = -1, x1 = -1;
+  for (let x = 0; x < width; x++) {
+    let off = 0;
+    for (let y = y0; y <= y1; y++) if (!onPage[y * width + x]) off++;
+    if (off < (y1 - y0 + 1) * 0.5) continue;
+    if (x0 < 0) x0 = x;
+    x1 = x;
+  }
+  if (x0 < 0) return null;
+  const area = (x1 - x0 + 1) * (y1 - y0 + 1);
+  if (area < n * CARD_MIN_PICTURE) return null;
+  const mask = new Uint8Array(n), glyphs = new Uint8Array(n);
+  let share = 0, page = 0;
+  for (let y = 0; y < height; y++) {
+    for (let x = 0; x < width; x++) {
+      if (x >= x0 && x <= x1 && y >= y0 && y <= y1) continue;
+      const i = y * width + x;
+      mask[i] = 1;
+      share++;
+      if (onPage[i]) page++;
+      else glyphs[i] = 1;
+    }
+  }
+  if (page < (n - area) * CARD_MIN_PAGE) return null;
+  // The picture's rounded corners show the page, which would stay white.
+  const corner = Math.round(Math.min(x1 - x0, y1 - y0) * 0.06);
+  for (let y = 0; y < corner; y++) {
+    for (let x = 0; x < corner; x++) {
+      for (const i of [(y0 + y) * width + x0 + x, (y0 + y) * width + x1 - x, (y1 - y) * width + x0 + x, (y1 - y) * width + x1 - x]) {
+        if (onPage[i] && !mask[i]) { mask[i] = 1; share++; }
+      }
+    }
+  }
+  // A channel's avatar beside the title is a small photo, so it stays too, holes and all.
+  const queue = new Int32Array(n);
+  eachGroup(glyphs, width, queue, (start, end) => {
+    if (end - start < n * 0.004 || !isPhotoLike(data, queue, start, end)) return;
+    const rows = new Map();
+    for (let i = start; i < end; i++) {
+      const x = queue[i] % width, y = (queue[i] - x) / width, row = rows.get(y);
+      if (!row) rows.set(y, [x, x]);
+      else if (x < row[0]) row[0] = x;
+      else if (x > row[1]) row[1] = x;
+    }
+    for (const [y, [from, to]] of rows) {
+      mask.fill(0, y * width + from, y * width + to + 1);
+      share -= to - from + 1;
+    }
+  });
+  return { mask, share: share / n, lines: textLines(glyphBoxes(glyphs, width, height, queue), height) };
+}
+
+const isCardScreenshot = ({ lines }) => lines >= 1;
 
 function isPartialScreenshot({ share, ink, lines }) {
   return share >= 0.4 && (ink >= 0.02 ? lines >= 2 : ink >= 0.005 && lines >= 5);
@@ -617,7 +719,7 @@ function dataUrl(blob) {
 }
 
 // Returns the partly dark picture as a data URL, or null if it isn't that kind of image.
-async function partialDarken(blob, accepts = isPartialScreenshot) {
+async function partialDarken(blob, accepts = isPartialScreenshot, findMask = pageMask) {
   const bitmap = await createImageBitmap(blob);
   const scale = Math.min(1, PARTIAL_SIZE / Math.max(bitmap.width, bitmap.height));
   const w = Math.max(1, Math.round(bitmap.width * scale));
@@ -625,7 +727,7 @@ async function partialDarken(blob, accepts = isPartialScreenshot) {
   const picture = new OffscreenCanvas(w, h);
   const ctx = picture.getContext('2d', { willReadFrequently: true });
   ctx.drawImage(bitmap, 0, 0, w, h);
-  const found = pageMask(ctx.getImageData(0, 0, w, h).data, w, h);
+  const found = findMask(ctx.getImageData(0, 0, w, h).data, w, h);
   if (!found || !accepts(found)) {
     bitmap.close();
     return null;

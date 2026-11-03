@@ -31,6 +31,9 @@ async function inspectImage(url, fullUrl) {
     const blob = await res.blob();
     const stats = await analyzeBlob(blob);
     await checkFullSize(stats, fullUrl);
+    // A card is mostly picture, so the model can't see a screen in it. The picture stays as it is
+    // whatever the call, so a wrong one costs only a dark margin.
+    if (stats.partial && stats.card) return stats;
     // What the pixel checks would darken goes to the model, which can only say no. A no keeps the
     // partial copy, for the right-click override.
     if (!stats.partial && !isLightScreenshot(stats, (await readSettings()).tinted ?? true)) return stats;
@@ -42,6 +45,7 @@ async function inspectImage(url, fullUrl) {
 async function checkFullSize(stats, fullUrl) {
   const framed = mayBeFrame(stats);
   const page = framed || mayBePartial(stats);
+  const card = !page && !stats.around && mayBeCard(stats);
   if (fullUrl && allowedImage(fullUrl) && !page && mayBePalePhoto(stats)) {
     try {
       const full = await fetch(fullUrl, { credentials: 'omit' });
@@ -49,15 +53,17 @@ async function checkFullSize(stats, fullUrl) {
     } catch {}
     return;
   }
-  if (!fullUrl || !allowedImage(fullUrl) || !(page || stats.around)) return;
+  if (!fullUrl || !allowedImage(fullUrl) || !(page || card || stats.around)) return;
   try {
     const full = await fetch(fullUrl, { credentials: 'omit' });
-    if (full.ok && page) stats.partial = await partialDarken(await full.blob(), framed ? isFrameScreenshot : undefined);
+    if (full.ok && card) stats.partial = await partialDarken(await full.blob(), isCardScreenshot, cardMask);
+    else if (full.ok && page) stats.partial = await partialDarken(await full.blob(), framed ? isFrameScreenshot : undefined);
     else if (full.ok) {
       stats.partial = await darkenAroundPanel(await full.blob(), stats.around);
       stats.panelled = !!stats.partial;
     }
-    stats.framed = framed;
+    stats.framed = framed || card;
+    stats.card = card;
   } catch {}
 }
 
