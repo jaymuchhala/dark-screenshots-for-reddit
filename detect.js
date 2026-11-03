@@ -58,7 +58,7 @@ const VIDEO_PART_SHARE = 0.1;
 const VIDEO_PART_HITS = 3;
 const VIDEO_PART_SIZE = 480;
 const VIDEO_TIMEOUT_MS = 15000;
-const AI_IMAGE_SIZE = 768;
+const SCREEN_INPUT_SIZE = 224;
 
 // Page only: the worker has no video element. Samples frames across the whole video,
 // because a poster or a single frame can be a white title card on real-life footage.
@@ -440,18 +440,28 @@ function maskCanvas(on, w, h) {
   return canvas;
 }
 
-// The size of copy the AI check looks at.
-async function aiImage(blob) {
+// What the model looks at: a squashed 224x224 copy, as base64 RGB, since messages can't carry bytes.
+async function screenPixels(blob) {
   const bitmap = await createImageBitmap(blob);
-  const scale = Math.min(1, AI_IMAGE_SIZE / Math.max(bitmap.width, bitmap.height));
-  const canvas = new OffscreenCanvas(Math.max(1, Math.round(bitmap.width * scale)), Math.max(1, Math.round(bitmap.height * scale)));
-  canvas.getContext('2d').drawImage(bitmap, 0, 0, canvas.width, canvas.height);
+  const canvas = new OffscreenCanvas(SCREEN_INPUT_SIZE, SCREEN_INPUT_SIZE);
+  const context = canvas.getContext('2d', { willReadFrequently: true });
+  context.imageSmoothingQuality = 'high';
+  context.fillStyle = '#fff';
+  context.fillRect(0, 0, SCREEN_INPUT_SIZE, SCREEN_INPUT_SIZE);
+  context.drawImage(bitmap, 0, 0, SCREEN_INPUT_SIZE, SCREEN_INPUT_SIZE);
   bitmap.close();
-  return dataUrl(await canvas.convertToBlob({ type: 'image/jpeg', quality: 0.85 }));
+  const rgba = context.getImageData(0, 0, SCREEN_INPUT_SIZE, SCREEN_INPUT_SIZE).data;
+  const chars = new Array(SCREEN_INPUT_SIZE * SCREEN_INPUT_SIZE * 3);
+  for (let i = 0, n = 0; i < rgba.length; i += 4) {
+    chars[n++] = String.fromCharCode(rgba[i]);
+    chars[n++] = String.fromCharCode(rgba[i + 1]);
+    chars[n++] = String.fromCharCode(rgba[i + 2]);
+  }
+  return btoa(chars.join(''));
 }
 
-// A frame from the middle of a video, for the AI check. Null if the file can't be read.
-async function aiVideoFrame(url) {
+// A frame from the middle of a video, for the model. Null if the file can't be read.
+async function screenVideoFrame(url) {
   const video = document.createElement('video');
   video.crossOrigin = 'anonymous';
   video.muted = true;
@@ -472,7 +482,7 @@ async function aiVideoFrame(url) {
         await seeked;
         const canvas = new OffscreenCanvas(video.videoWidth, video.videoHeight);
         canvas.getContext('2d').drawImage(video, 0, 0);
-        return aiImage(await canvas.convertToBlob());
+        return screenPixels(await canvas.convertToBlob());
       })(),
       new Promise((resolve) => { timer = setTimeout(resolve, VIDEO_TIMEOUT_MS, null); }),
     ]);

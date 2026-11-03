@@ -30,23 +30,7 @@
     <input type="checkbox" id="tinted" class="switch">
   </label>
 
-  <label class="row minor ai-row">
-    <span>AI check</span>
-    <select id="aiEngine">
-      <option value="auto">Automatic</option>
-      <option value="ollama">Ollama</option>
-      <option value="chrome">Chrome's built-in AI</option>
-      <option value="off">Off</option>
-    </select>
-  </label>
-  <small id="aiStatus" class="ai-status"></small>
-  <div id="aiFix" class="ai-fix" hidden>
-    <code id="aiCommand"></code>
-    <button id="aiButton" class="text-btn" type="button"></button>
-  </div>
-
   <p>Wrong call? Right-click the image or video and choose "Change dark mode".</p>
-  <script src="../ai.js"></script>
   <script src="popup.js"></script>
 </body>
 </html>

@@ -2,15 +2,6 @@ importScripts('detect.js');
 
 const IMAGE_HOSTS = new Set(['i.redd.it', 'preview.redd.it', 'external-preview.redd.it']);
 const MAX_FETCHES = 4;
-const AI_TIMEOUT_MS = 30000;
-const AI_BURST_MS = 24000;     // model time in hand: enough for a page's first images, back to back
-const AI_REFILL = 1 / 6;       // model time earned per ms, so over a long stretch it's busy 1/7 of the time at most
-const AI_CALL_GUESS_MS = 4000;
-const AI_REST_MAX_MS = 90000;
-const AI_PICK_MS = 30000;      // how long to trust which engine is ready
-const AI_VERSION = 1;          // raise when the prompt changes, so old answers go
-const MAX_AI_ANSWERS = 2000;
-
 let running = 0;
 const waiting = [];
 
@@ -26,50 +17,55 @@ async function withSlot(job) {
 }
 
 // The page can't read the pixels of images from another host, but the worker can.
-async function checkImage(url, fullUrl, key) {
+async function checkImage(url, fullUrl) {
   if (!allowedImage(url)) return null;
-  const stats = await inspectImage(url, fullUrl);
-  if (!stats || !(stats.partial || isLightScreenshot(stats, (await readSettings()).tinted ?? true))) return stats;
-  stats.ai = await aiKnown(key).catch(() => null);
-  return stats;
+  return inspectImage(url, fullUrl);
 }
 
 const allowedImage = (u) => IMAGE_HOSTS.has(new URL(u).hostname);
 
 async function inspectImage(url, fullUrl) {
-  const allowed = allowedImage;
   return withSlot(async () => {
     const res = await fetch(url, { credentials: 'omit' });
     if (!res.ok) return null;
-    const stats = await analyzeBlob(await res.blob());
-    const framed = mayBeFrame(stats);
-    const page = framed || mayBePartial(stats);
-    if (fullUrl && allowed(fullUrl) && !page && mayBePalePhoto(stats)) {
-      try {
-        const full = await fetch(fullUrl, { credentials: 'omit' });
-        if (full.ok && await isPalePhoto(await full.blob())) stats.photo = 1;
-      } catch {}
-      return stats;
-    }
-    if (!fullUrl || !allowed(fullUrl) || !(page || stats.around)) return stats;
+    const blob = await res.blob();
+    const stats = await analyzeBlob(blob);
+    await checkFullSize(stats, fullUrl);
+    // What the pixel checks would darken goes to the model, which can only say no. A no keeps the
+    // partial copy, for the right-click override.
+    if (!stats.partial && !isLightScreenshot(stats, (await readSettings()).tinted ?? true)) return stats;
+    if (await isScreen(await screenPixels(blob)) !== false) return stats;
+    return { ...stats, photo: 1, partial: null, vetoedPartial: stats.partial };
+  });
+}
+
+async function checkFullSize(stats, fullUrl) {
+  const framed = mayBeFrame(stats);
+  const page = framed || mayBePartial(stats);
+  if (fullUrl && allowedImage(fullUrl) && !page && mayBePalePhoto(stats)) {
     try {
       const full = await fetch(fullUrl, { credentials: 'omit' });
-      if (full.ok && page) stats.partial = await partialDarken(await full.blob(), framed ? isFrameScreenshot : undefined);
-      else if (full.ok) {
-        stats.partial = await darkenAroundPanel(await full.blob(), stats.around);
-        stats.panelled = !!stats.partial;
-      }
-      stats.framed = framed;
+      if (full.ok && await isPalePhoto(await full.blob())) stats.photo = 1;
     } catch {}
-    return stats;
-  });
+    return;
+  }
+  if (!fullUrl || !allowedImage(fullUrl) || !(page || stats.around)) return;
+  try {
+    const full = await fetch(fullUrl, { credentials: 'omit' });
+    if (full.ok && page) stats.partial = await partialDarken(await full.blob(), framed ? isFrameScreenshot : undefined);
+    else if (full.ok) {
+      stats.partial = await darkenAroundPanel(await full.blob(), stats.around);
+      stats.panelled = !!stats.partial;
+    }
+    stats.framed = framed;
+  } catch {}
 }
 
 async function readSettings() {
   return (await chrome.storage.local.get('settings')).settings || {};
 }
 
-// ---------- The AI check, which can stop an image from being darkened ----------
+// ---------- The model, which can stop an image from being darkened ----------
 
 let offscreenReady = null;
 async function toOffscreen(msg) {
@@ -85,127 +81,9 @@ async function toOffscreen(msg) {
   return chrome.runtime.sendMessage({ target: 'offscreen', ...msg });
 }
 
-let aiPicked = null;
-let aiPickedAt = 0;
-async function aiPick() {
-  const choice = (await readSettings()).aiEngine ?? 'off';
-  if (choice === 'off') return null;
-  if (Date.now() - aiPickedAt > AI_PICK_MS) {
-    aiPicked = await toOffscreen({ type: 'ai-pick', choice });
-    aiPickedAt = Date.now();
-  }
-  return aiPicked;
-}
-
-// Saved answers, so each image is asked about once.
-let aiAnswers = null;
-async function loadAnswers() {
-  if (!aiAnswers) {
-    const saved = (await chrome.storage.local.get('aiAnswers')).aiAnswers;
-    aiAnswers = saved?.version === AI_VERSION ? saved.seen : {};
-  }
-  return aiAnswers;
-}
-
-chrome.storage.onChanged.addListener((changes) => {
-  if (changes.settings) aiPickedAt = 0;
-  if (changes.aiAnswers && !changes.aiAnswers.newValue) aiAnswers = null;
-});
-
-async function aiCanAnswer(key) {
-  try {
-    if (((await readSettings()).aiEngine ?? 'off') === 'off') return false;
-    return key in await loadAnswers() || !!await aiPick();
-  } catch {
-    return false;
-  }
-}
-
-// The saved answer if there is one, 'ask' if the AI can be asked, null if not.
-async function aiKnown(key) {
-  if (!await aiCanAnswer(key)) return null;
-  const answers = await loadAnswers();
-  return key in answers ? answers[key] : 'ask';
-}
-
-// One at a time, newest first.
-const aiQueue = [];
-let aiRunning = null;
-function nextAiJob() {
-  if (aiRunning || !aiQueue.length) return;
-  aiRunning = aiQueue.pop();
-  aiRunning.run().finally(() => {
-    aiRunning = null;
-    nextAiJob();
-  });
-}
-
-// The page in that tab moved, so its model calls make way. Uploads stay.
-function cancelAi(tab) {
-  for (let i = aiQueue.length - 1; i >= 0; i--) {
-    if (aiQueue[i].tab === tab) aiQueue.splice(i, 1)[0].resolve('cancelled');
-  }
-  if (aiRunning?.tab !== tab) return;
-  aiRunning.cancelled = true;
-  aiRunning.resolve('cancelled');
-  toOffscreen({ type: 'ai-cancel' }).catch(() => {});
-}
-
-// Model time goes on a budget, not a rest after every call: a page can use a burst of it, and
-// heat only comes from keeping it up. Kept for all tabs, and past the worker going idle.
-async function aiBudget() {
-  const now = Date.now();
-  const { aiBudget: saved } = await chrome.storage.session.get('aiBudget');
-  if (!saved) return { ms: AI_BURST_MS, at: now, call: AI_CALL_GUESS_MS };
-  return { ...saved, ms: Math.min(AI_BURST_MS, saved.ms + (now - saved.at) * AI_REFILL), at: now };
-}
-
-async function spendAiBudget(spent, cancelled) {
-  const budget = await aiBudget();
-  budget.ms = Math.max(-AI_REST_MAX_MS * AI_REFILL, budget.ms - spent);
-  if (!cancelled) budget.call = spent;
-  await chrome.storage.session.set({ aiBudget: budget });
-}
-
-// True if the image is a screen, false if not, null if there's no answer, 'cancelled' if the
-// page moved, or { restMs } if the model is resting. An image comes as a data URL, or as a url
-// to fetch. Images on the page have a key and keep to the budget; an upload is someone waiting.
-function askAi({ key, url, image }, tab) {
-  return new Promise((resolve) => {
-    const job = { tab: key ? tab : null, resolve, cancelled: false };
-    aiQueue.push(job);
-    job.run = async () => {
-      if (job.cancelled) return;
-      try {
-        const answers = await loadAnswers();
-        if (key && key in answers) return resolve(answers[key]);
-        const pick = await aiPick();
-        if (!pick) return resolve(null);
-        if (key) {
-          const { ms, call } = await aiBudget();
-          const needed = Math.min(call, AI_BURST_MS / 4);
-          if (ms < needed) return resolve({ restMs: Math.min(AI_REST_MAX_MS, (needed - ms) / AI_REFILL) });
-        }
-        if (url && !allowedImage(url)) return resolve(null);
-        const sent = image || await aiImage(await (await fetch(url, { credentials: 'omit' })).blob());
-        const started = Date.now();
-        const screen = await toOffscreen({ type: 'ai-ask', pick, image: sent, timeoutMs: AI_TIMEOUT_MS });
-        await spendAiBudget(Date.now() - started, job.cancelled);
-        if (screen === null) { if (!job.cancelled) aiPickedAt = 0; }
-        else if (key) {
-          answers[key] = screen;
-          const keys = Object.keys(answers);
-          if (keys.length > MAX_AI_ANSWERS) delete answers[keys[0]];
-          await chrome.storage.local.set({ aiAnswers: { version: AI_VERSION, seen: answers } });
-        }
-        resolve(screen);
-      } catch {
-        aiPickedAt = 0;
-        resolve(null);
-      }
-    };
-    nextAiJob();
-  });
+// null: no answer, so the pixel checks decide.
+async function isScreen(pixels) {
+  return toOffscreen({ type: 'is-screen', pixels }).catch(() => null);
 }
 
 // Development: when loaded unpacked (no update_url), reload when build.txt changes,
@@ -226,17 +104,12 @@ checkBuild();
 chrome.runtime.onMessage.addListener((msg, sender, reply) => {
   if (sender.id !== chrome.runtime.id || msg.target) return;
   if (msg.type === 'check-build') checkBuild();
-  if (msg.type === 'ai-known') {
-    aiKnown(msg.key).then(reply, () => reply(null));
+  if (msg.type === 'is-screen') {
+    isScreen(msg.pixels).then(reply);
     return true;
   }
-  if (msg.type === 'ask-ai') {
-    askAi(msg, sender.tab?.id).then(reply);
-    return true;
-  }
-  if (msg.type === 'ai-cancel') cancelAi(sender.tab?.id);
   if (msg.type !== 'check-image') return;
-  checkImage(msg.url, msg.fullUrl, msg.key).then(reply, () => reply(null));
+  checkImage(msg.url, msg.fullUrl).then(reply, () => reply(null));
   return true;
 });
 

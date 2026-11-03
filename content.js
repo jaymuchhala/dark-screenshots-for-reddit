@@ -10,15 +10,7 @@
   const PLAYER_TRIES = 100, PLAYER_RETRY_MS = 100;
   const VIDEO_REVEAL_AFTER_MS = 6000;
   const AHEAD_SCREENS = 4;       // how far past the screen images get checked, so they're dark when they arrive
-  const AI_STILL_MS = 300;       // a gap this long between scrolls is enough to start the AI check
-  const AI_STILL_MAX_MS = 2400;
-  const AI_REACH_MIN_SCREENS = 2;
-  const AI_AHEAD_CALLS = 4;
-  const AI_BEHIND_COST = 3;
-  const AI_CALL_GUESS_MS = 4000;
-  const AI_TRAVEL_HALF_LIFE_MS = 10000;
-  const VETO_FADE_MS = 300;
-  const AI_UPLOAD_WAIT_MS = 30000;
+  const SCREEN_UPLOAD_WAIT_MS = 5000;
   const PARTS = 'parts';
   const PARTS_CHECK_MS = 100;
   const PARTS_MIN_LOOK_MS = 66;
@@ -36,7 +28,6 @@
   // ---------- Reader: darken screenshots already on the page ----------
 
   const verdicts = new Map();   // image key -> pixel stats or null, or a promise while checking
-  const aiWaiting = new Map();  // image key -> { ask, veto } for the AI check
   const tracked = new Map();    // img -> { hidden, darkened, filter, held }
   const players = new Map();    // video player -> { hidden, held, timer, expired }
   const partVideos = new Map(); // video darkened in parts -> { ready, stop }
@@ -458,8 +449,7 @@
     if (verdicts.has(key)) return verdicts.get(key);
     const check = img.localName !== 'img'
       ? videoVerdict(key, url, img)
-      : chrome.runtime.sendMessage({ type: 'check-image', key, url: smallestUrl(img, url), fullUrl: largestUrl(img, url) })
-        .then((stats) => imageVerdict(key, stats, largestUrl(img, url)));
+      : chrome.runtime.sendMessage({ type: 'check-image', url: smallestUrl(img, url), fullUrl: largestUrl(img, url) });
     const pending = check.catch(() => null).then((result) => settleVerdict(key, result));
     verdicts.set(key, pending);
     return pending;
@@ -471,138 +461,20 @@
     for (const player of players.keys()) updatePlayer(player);
   }
 
-  // ---------- The AI check, which can undo a darkening before it's seen ----------
-
-  // The model fills the GPU that also scrolls the page, so nothing waits on it: the pixel checks'
-  // verdict shows at once, and the model works ahead on what's about to be seen, in the gaps
-  // between scrolls. Any movement stops it. A saved answer applies straight away.
-  function imageVerdict(key, stats, url) {
-    if (!stats || key in overrides) return stats;
-    const veto = () => ({ ...stats, photo: 1, partial: null, vetoedPartial: stats.partial });
-    if (stats.ai === false) return veto();
-    if (stats.ai === 'ask') askSoon(key, () => askAi({ key, url }), veto);
-    return stats;
-  }
-
-  // What's saved is the pixel checks' verdict, so the AI check can change its mind on it later.
+  // A video the pixel checks would darken goes to the model too, which can only say no.
   async function videoVerdict(key, url, player) {
-    const pixels = key in savedVideos ? savedVideos[key] : await withVideoSlot(() => checkVideo(url, largerUrl(playerOf(player))));
-    if (pixels !== null && !(key in savedVideos)) saveVideoVerdict(key, pixels);
-    if (pixels !== true) return pixels;
-    const known = await chrome.runtime.sendMessage({ type: 'ai-known', key }).catch(() => null);
-    if (known === 'ask') askSoon(key, () => askAboutVideo(key, player), () => null);
-    return known !== false;
+    if (key in savedVideos) return savedVideos[key];
+    const verdict = await withVideoSlot(async () => {
+      const pixels = await checkVideo(url, largerUrl(playerOf(player)));
+      if (pixels !== true) return pixels;
+      const frameUrl = largerUrl(playerOf(player));
+      const frame = frameUrl && await screenVideoFrame(frameUrl);
+      if (!frame) return true;
+      return await chrome.runtime.sendMessage({ type: 'is-screen', pixels: frame }).catch(() => null) !== false;
+    });
+    if (verdict !== null) saveVideoVerdict(key, verdict);
+    return verdict;
   }
-
-  async function askAboutVideo(key, player) {
-    const moves = aiMoves;
-    const url = largerUrl(playerOf(player));
-    const image = url && await aiVideoFrame(url);
-    if (!image) return null;
-    return moves === aiMoves ? askAi({ key, image }) : 'cancelled';
-  }
-
-  const askAi = (message) => chrome.runtime.sendMessage({ type: 'ask-ai', ...message }).catch(() => 'cancelled');
-
-  let aiTimer = null;
-  let aiAsking = false;
-  let aiMoves = 0;
-  let aiStillMs = AI_STILL_MS;
-  let aiCallMs = AI_CALL_GUESS_MS;
-  let travel = 0, travelAt = 0, lastY = scrollY, scrollDirection = 1;
-
-  function askSoon(key, ask, veto) {
-    aiWaiting.set(key, { ask, veto });
-    if (!aiTimer && !aiAsking) askLater(aiStillMs);
-  }
-
-  function askLater(ms) {
-    clearTimeout(aiTimer);
-    aiTimer = aiWaiting.size ? setTimeout(askNext, ms) : null;
-  }
-
-  // Distance scrolled lately, fading by half every AI_TRAVEL_HALF_LIFE_MS.
-  const travelNow = (now) => travel * 0.5 ** ((now - travelAt) / AI_TRAVEL_HALF_LIFE_MS);
-
-  // How far past the screen to look: as far as the reader gets in the time the model takes
-  // over its next few images. A faster reader or a slower model reaches further.
-  function aiReach() {
-    const pxPerMs = travelNow(Date.now()) * Math.LN2 / AI_TRAVEL_HALF_LIFE_MS;
-    return Math.min(AHEAD_SCREENS, Math.max(AI_REACH_MIN_SCREENS, pxPerMs * aiCallMs * AI_AHEAD_CALLS / innerHeight)) * innerHeight;
-  }
-
-  // The nearest waiting image in reach. What's behind the reader counts as further away.
-  function aiNextKey() {
-    const reach = aiReach();
-    let next = null, nearest = Infinity;
-    for (const el of [...tracked.keys(), ...players.keys()]) {
-      if (!el.isConnected) continue;
-      const url = el.localName === 'img' || el.localName === 'video' ? imageUrl(el) : playerUrl(el);
-      const key = url && imageKey(url);
-      if (!aiWaiting.has(key)) continue;
-      const box = el.getBoundingClientRect();
-      if (!box.width) continue;
-      const below = box.top - innerHeight, above = -box.bottom;
-      const behind = (below > 0 && scrollDirection < 0) || (above > 0 && scrollDirection > 0);
-      const distance = Math.max(0, below, above) * (behind ? AI_BEHIND_COST : 1);
-      if (distance <= reach && distance < nearest) {
-        next = key;
-        nearest = distance;
-      }
-    }
-    return next;
-  }
-
-  async function askNext() {
-    aiTimer = null;
-    if (aiAsking || document.hidden || !chrome.runtime?.id) return;
-    const key = aiNextKey();
-    if (!key) return;
-    const job = aiWaiting.get(key);
-    aiAsking = true;
-    const started = Date.now();
-    const said = await job.ask();
-    aiAsking = false;
-    if (said?.restMs) return askLater(said.restMs);
-    if (said !== 'cancelled') {
-      aiWaiting.delete(key);
-      aiStillMs = AI_STILL_MS;
-    }
-    if (typeof said === 'boolean') aiCallMs = Date.now() - started;
-    if (said === false) {
-      fadeOnce(key);
-      settleVerdict(key, job.veto());
-    }
-    askLater(aiStillMs);
-  }
-
-  // An answer that comes while the image is on show changes it softly.
-  function fadeOnce(key) {
-    for (const img of tracked.keys()) {
-      if (img.localName !== 'img' || imageKey(imageUrl(img)) !== key) continue;
-      img.style.setProperty('transition', `filter ${VETO_FADE_MS}ms`);
-      setTimeout(() => img.style.removeProperty('transition'), VETO_FADE_MS);
-    }
-  }
-
-  // A stopped call is wasted work, so someone who keeps scrolling gets a longer wait each time.
-  function pageMoved() {
-    aiMoves++;
-    const now = Date.now(), moved = scrollY - lastY;
-    if (moved) {
-      travel = travelNow(now) + Math.abs(moved);
-      travelAt = now;
-      scrollDirection = Math.sign(moved);
-      lastY = scrollY;
-    }
-    if (aiAsking) {
-      aiStillMs = Math.min(AI_STILL_MAX_MS, aiStillMs * 2);
-      chrome.runtime.sendMessage({ type: 'ai-cancel' }).catch(() => {});
-    }
-    askLater(aiStillMs);
-  }
-  for (const type of ['scroll', 'wheel', 'keydown']) window.addEventListener(type, pageMoved, { capture: true, passive: true });
-  document.addEventListener('visibilitychange', pageMoved);
 
   // Off screen nothing shows, so a check that's still going keeps its hold until it can be seen.
   function whenOnScreen(el, ms, act) {
@@ -618,7 +490,7 @@
     savedVideos[key] = verdict;
     const keys = Object.keys(savedVideos);
     if (keys.length > MAX_SAVED_VIDEOS) delete savedVideos[keys[0]];
-    chrome.storage.local.set({ videoChecks: savedVideos });
+    chrome.storage.local.set({ videoScreens: savedVideos });
   }
 
   const viewport = new IntersectionObserver((entries) => {
@@ -802,11 +674,9 @@
     setTimeout(() => host.remove(), 2500);
   }
 
-  // The upload can't wait as long as an image on the page can.
-  async function isAiVeto(file) {
-    if ((settings.aiEngine ?? 'off') === 'off') return false;
-    const ask = chrome.runtime.sendMessage({ type: 'ask-ai', image: await aiImage(file) });
-    const late = new Promise((resolve) => setTimeout(resolve, AI_UPLOAD_WAIT_MS, null));
+  async function isNotScreen(file) {
+    const ask = chrome.runtime.sendMessage({ type: 'is-screen', pixels: await screenPixels(file) });
+    const late = new Promise((resolve) => setTimeout(resolve, SCREEN_UPLOAD_WAIT_MS, null));
     return await Promise.race([ask, late]) === false;
   }
 
@@ -819,7 +689,7 @@
       try {
         const stats = await analyzeBlob(file);
         if (!isLightScreenshot(stats, settings.tinted) || (mayBePalePhoto(stats) && await isPalePhoto(file))) return file;
-        if (await isAiVeto(file)) return file;
+        if (await isNotScreen(file)) return file;
         const dark = await darkenBlob(file);
         changed++;
         return new File([dark], file.name, { type: dark.type, lastModified: file.lastModified });
@@ -895,20 +765,20 @@
 
   chrome.storage.onChanged.addListener((changes, area) => {
     if (area !== 'local') return;
-    if (changes.videoChecks) savedVideos = changes.videoChecks.newValue || {};
+    if (changes.videoScreens) savedVideos = changes.videoScreens.newValue || {};
     if (!changes.settings && !changes.overrides) return;
     if (changes.settings) settings = { ...settings, ...changes.settings.newValue };
     if (changes.overrides) overrides = changes.overrides.newValue || {};
     refreshAll();
   });
 
-  // Verdicts from before videos could be darkened in parts have to be checked again.
-  chrome.storage.local.remove('videoVerdicts');
-  chrome.storage.local.get(['settings', 'overrides', 'videoChecks']).then((stored) => {
+  // Verdicts from before the model, and what the old AI check left behind, go.
+  chrome.storage.local.remove(['videoVerdicts', 'videoChecks', 'aiAnswers']);
+  chrome.storage.local.get(['settings', 'overrides', 'videoScreens']).then((stored) => {
     settings = { ...settings, ...stored.settings };
     overrides = stored.overrides || {};
-    savedVideos = stored.videoChecks || {};
-    for (const [key, verdict] of Object.entries(savedVideos)) if (verdict !== true) verdicts.set(key, verdict || null);
+    savedVideos = stored.videoScreens || {};
+    for (const [key, verdict] of Object.entries(savedVideos)) verdicts.set(key, verdict || null);
     watchRoot(document);
   });
 
