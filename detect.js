@@ -101,7 +101,7 @@ async function analyzeBlob(blob) {
   ctx.drawImage(bitmap, 0, 0, w, h);
   bitmap.close();
   const { data } = ctx.getImageData(0, 0, w, h);
-  return { ...measure(data, w, h), sides: paleSides(data, w, h) };
+  return { ...measure(data, w, h), sides: paleSides(data, w, h), around: darkPanelKind(data, w, h) };
 }
 
 // Some screenshots are a white page with dark panels and photos on it. Inverting the
@@ -120,6 +120,7 @@ function mayBePartial(stats) {
 // With the tinted setting off, a cream page isn't darkened.
 function usesPartial(stats, allowTinted, allowFrames) {
   if (!stats?.partial || (stats.framed && !allowFrames)) return false;
+  if (stats.panelled) return true;
   return allowTinted || stats.light >= (stats.framed ? FRAME_MIN_LIGHT : PARTIAL_MIN_LIGHT);
 }
 
@@ -168,7 +169,7 @@ function eachGroup(want, width, queue, found) {
       if (c + width < n && want[c + width] && !seen[c + width]) { seen[c + width] = 1; queue[end++] = c + width; }
       if (c - width >= 0 && want[c - width] && !seen[c - width]) { seen[c - width] = 1; queue[end++] = c - width; }
     }
-    found(0, end);
+    found(0, end, queue);
   }
 }
 
@@ -318,6 +319,24 @@ function grown(mask, width) {
   return out;
 }
 
+function maskCanvas(on, w, h) {
+  const canvas = new OffscreenCanvas(w, h);
+  const ctx = canvas.getContext('2d');
+  const pixels = ctx.createImageData(w, h);
+  on.forEach((value, i) => { pixels.data[i * 4 + 3] = value ? 255 : 0; });
+  ctx.putImageData(pixels, 0, 0);
+  return canvas;
+}
+
+function dataUrl(blob) {
+  return new Promise((resolve, reject) => {
+    const reader = new FileReader();
+    reader.onload = () => resolve(reader.result);
+    reader.onerror = reject;
+    reader.readAsDataURL(blob);
+  });
+}
+
 // Returns the partly dark picture as a data URL, or null if it isn't that kind of image.
 async function partialDarken(blob, accepts = isPartialScreenshot) {
   const bitmap = await createImageBitmap(blob);
@@ -332,11 +351,7 @@ async function partialDarken(blob, accepts = isPartialScreenshot) {
     bitmap.close();
     return null;
   }
-  const mask = new OffscreenCanvas(w, h);
-  const maskCtx = mask.getContext('2d');
-  const pixels = maskCtx.createImageData(w, h);
-  grown(found.mask, w).forEach((on, i) => { pixels.data[i * 4 + 3] = on ? 255 : 0; });
-  maskCtx.putImageData(pixels, 0, 0);
+  const mask = maskCanvas(grown(found.mask, w), w, h);
   const dark = new OffscreenCanvas(w, h);
   const darkCtx = dark.getContext('2d');
   darkCtx.filter = DARK_FILTER;
@@ -347,12 +362,198 @@ async function partialDarken(blob, accepts = isPartialScreenshot) {
   bitmap.close();
   ctx.drawImage(dark, 0, 0);
   const out = await picture.convertToBlob({ type: 'image/webp', quality: 0.9 });
-  return new Promise((resolve, reject) => {
-    const reader = new FileReader();
-    reader.onload = () => resolve(reader.result);
-    reader.onerror = reject;
-    reader.readAsDataURL(out);
+  return dataUrl(out);
+}
+
+// A dark panel shown off on something bright that isn't a page: a blurred screenshot
+// behind it, or a photo under a browser's pale toolbar. The panel stays as it is.
+const PANEL_GRID = 24;
+const PANEL_MIN_AREA = 0.05;
+const BAR_MIN = 0.03, BAR_MAX = 0.25;
+
+const isDarkPixel = (data, i) => 0.299 * data[i] + 0.587 * data[i + 1] + 0.114 * data[i + 2] < 80 &&
+  Math.max(data[i], data[i + 1], data[i + 2]) - Math.min(data[i], data[i + 1], data[i + 2]) < 70;
+
+// The biggest solid dark rectangle, with exact edges, or null.
+function findPanel(data, width, height) {
+  const cell = Math.max(2, Math.round(Math.max(width, height) / PANEL_GRID));
+  const cols = Math.ceil(width / cell), rows = Math.ceil(height / cell);
+  const dark = new Float32Array(cols * rows), count = new Float32Array(cols * rows);
+  for (let y = 0; y < height; y++) {
+    for (let x = 0; x < width; x++) {
+      const c = Math.floor(y / cell) * cols + Math.floor(x / cell);
+      count[c]++;
+      if (isDarkPixel(data, (y * width + x) * 4)) dark[c]++;
+    }
+  }
+  const want = new Uint8Array(cols * rows);
+  for (let c = 0; c < want.length; c++) want[c] = dark[c] / count[c] >= 0.5 ? 1 : 0;
+  let best = null;
+  eachGroup(want, cols, new Int32Array(cols * rows), (start, end, queue) => {
+    let x0 = cols, x1 = 0, y0 = rows, y1 = 0;
+    for (let i = start; i < end; i++) {
+      const x = queue[i] % cols, y = (queue[i] - x) / cols;
+      x0 = Math.min(x0, x); x1 = Math.max(x1, x); y0 = Math.min(y0, y); y1 = Math.max(y1, y);
+    }
+    const w = x1 - x0 + 1, h = y1 - y0 + 1;
+    if (end - start < w * h * 0.75 || (best && w * h <= best.w * best.h)) return;
+    best = { x0, y0, w, h };
   });
+  if (!best) return null;
+  const share = best.w * best.h * cell * cell / (width * height);
+  if (share < PANEL_MIN_AREA || share > 0.85) return null;
+  // Exact edges: the first line that's mostly dark, looking around the cell's edge.
+  const across = (y, from, to) => { let on = 0; for (let x = from; x < to; x++) if (isDarkPixel(data, (y * width + x) * 4)) on++; return on / (to - from); };
+  const down = (x, from, to) => { let on = 0; for (let y = from; y < to; y++) if (isDarkPixel(data, (y * width + x) * 4)) on++; return on / (to - from); };
+  const clampX = (x) => Math.max(0, Math.min(width - 1, x)), clampY = (y) => Math.max(0, Math.min(height - 1, y));
+  const left = best.x0 * cell, top = best.y0 * cell;
+  const right = clampX((best.x0 + best.w) * cell - 1), bottom = clampY((best.y0 + best.h) * cell - 1);
+  let y0 = clampY(top - cell), y1 = clampY(bottom + cell), x0 = clampX(left - cell), x1 = clampX(right + cell);
+  while (y0 < top + cell && across(y0, left, right + 1) < 0.4) y0++;
+  while (y1 > bottom - cell && across(y1, left, right + 1) < 0.4) y1--;
+  while (x0 < left + cell && down(x0, top, bottom + 1) < 0.4) x0++;
+  while (x1 > right - cell && down(x1, top, bottom + 1) < 0.4) x1--;
+  return { x0, y0, x1, y1 };
+}
+
+// Rows from the top that are almost all pale, as a share of the height.
+function topBar(data, width, height) {
+  let y = 0;
+  for (; y < height; y++) {
+    let pale = 0;
+    for (let x = 0; x < width; x++) {
+      const i = (y * width + x) * 4, r = data[i], g = data[i + 1], b = data[i + 2];
+      if (0.299 * r + 0.587 * g + 0.114 * b >= 190 && Math.max(r, g, b) - Math.min(r, g, b) <= 48) pale++;
+    }
+    if (pale < width * 0.85) break;
+  }
+  return y / height;
+}
+
+// The box holding everything sharp, or null if sharp things are spread over the image.
+// On a blurred background that's the panel, and its border makes for an exact edge.
+function sharpBox(data, width, height) {
+  const luma = (i) => 0.299 * data[i] + 0.587 * data[i + 1] + 0.114 * data[i + 2];
+  const rows = new Uint32Array(height), cols = new Uint32Array(width), sharp = new Uint8Array(width * height);
+  const sharpAt = (x, y) => sharp[y * width + x];
+  // Shrinking an image makes a soft edge steeper from pixel to pixel.
+  const edge = Math.max(24, 15360 / Math.max(width, height));
+  for (let y = 0; y + 1 < height; y++) {
+    for (let x = 0; x + 1 < width; x++) {
+      const i = (y * width + x) * 4, l = luma(i);
+      if (Math.abs(l - luma(i + 4)) > edge || Math.abs(l - luma(i + width * 4)) > edge) { rows[y]++; cols[x]++; sharp[y * width + x] = 1; }
+    }
+  }
+  const range = (counts, min) => {
+    let from = 0, to = counts.length - 1;
+    while (from < to && counts[from] < min) from++;
+    while (to > from && counts[to] < min) to--;
+    return [from, to];
+  };
+  const [x0, x1] = range(cols, height * 0.04), [y0, y1] = range(rows, width * 0.04);
+  const share = (x1 - x0 + 1) * (y1 - y0 + 1) / (width * height);
+  if (share < PANEL_MIN_AREA || share > 0.7) return null;
+  // Nothing sharp may be left outside the box.
+  let outside = 0;
+  for (let y = 0; y < height; y++) if (y < y0 || y > y1) outside += rows[y];
+  for (let x = 0; x < width; x++) if (x < x0 || x > x1) outside += cols[x];
+  if (outside > width * height * 0.004) return null;
+  // A panel is a dark rectangle with a straight outline and mostly flat insides. A sharp
+  // person in front of a blurred background is none of those. Small copies blur too much
+  // to show an outline, so they only decide whether the full size is worth a look.
+  if (Math.max(width, height) >= 600 && !isOutlined(x0, y0, x1, y1, width, height, sharpAt)) return null;
+  let sum = 0, count = 0;
+  for (let y = y0; y <= y1; y += 2) for (let x = x0; x <= x1; x += 2) { sum += luma((y * width + x) * 4); count++; }
+  return sum / count < 110 ? { x0, y0, x1, y1 } : null;
+}
+
+// All four sides have a line of edge pixels, and the insides aren't all edges.
+function isOutlined(x0, y0, x1, y1, width, height, sharpAt) {
+  const near = 3;
+  const line = (length, at) => {
+    for (let d = 0; d <= near; d++) {
+      let hits = 0;
+      for (let t = 0; t < length; t++) if (at(t, d)) hits++;
+      if (hits >= length * 0.5) return true;
+    }
+    return false;
+  };
+  const w = x1 - x0 + 1, h = y1 - y0 + 1;
+  const top = Math.max(0, y0 - 1), bottom = Math.min(height - 1, y1 + 1), left = Math.max(0, x0 - 1), right = Math.min(width - 1, x1 + 1);
+  if (!line(w, (t, d) => sharpAt(x0 + t, Math.min(height - 1, top + d))) || !line(w, (t, d) => sharpAt(x0 + t, Math.max(0, bottom - d))) ||
+    !line(h, (t, d) => sharpAt(Math.min(width - 1, left + d), y0 + t)) || !line(h, (t, d) => sharpAt(Math.max(0, right - d), y0 + t))) return false;
+  let on = 0, count = 0;
+  for (let y = y0; y <= y1; y += 2) for (let x = x0; x <= x1; x += 2) { on += sharpAt(x, y); count++; }
+  return on / count < 0.5;
+}
+
+// The brightness near the top of what's around the box.
+function peakAround(data, width, height, box) {
+  const lumas = [];
+  for (let y = 0; y < height; y += 2) {
+    for (let x = 0; x < width; x += 2) {
+      if (x >= box.x0 && x <= box.x1 && y >= box.y0 && y <= box.y1) continue;
+      const i = (y * width + x) * 4;
+      lumas.push(0.299 * data[i] + 0.587 * data[i + 1] + 0.114 * data[i + 2]);
+    }
+  }
+  lumas.sort((a, b) => a - b);
+  return lumas[Math.floor(lumas.length * 0.9)] || 0;
+}
+
+function darkPanelKind(data, width, height) {
+  const panel = findPanel(data, width, height);
+  const bar = topBar(data, width, height);
+  // A panel floats. A dark photo under a meme's caption runs to the edges of the image.
+  const floats = panel && panel.x0 > width * 0.01 && panel.x1 < width * 0.99 && panel.y1 < height * 0.99;
+  if (floats && bar >= BAR_MIN && bar <= BAR_MAX && panel.y0 >= height * bar - 2) return 'bar';
+  const box = sharpBox(data, width, height);
+  if (!box) return null;
+  // Already dark, or white and so a plain background rather than a washed-out blur.
+  const peak = peakAround(data, width, height, box);
+  return peak >= 90 && peak < 215 ? 'blur' : null;
+}
+
+// Returns the picture with its surroundings dark as a data URL, or null.
+async function darkenAroundPanel(blob, kind) {
+  const bitmap = await createImageBitmap(blob);
+  const scale = Math.min(1, PARTIAL_SIZE / Math.max(bitmap.width, bitmap.height));
+  const w = Math.max(1, Math.round(bitmap.width * scale));
+  const h = Math.max(1, Math.round(bitmap.height * scale));
+  const picture = new OffscreenCanvas(w, h);
+  const ctx = picture.getContext('2d', { willReadFrequently: true });
+  ctx.drawImage(bitmap, 0, 0, w, h);
+  const data = ctx.getImageData(0, 0, w, h).data;
+  const dark = new OffscreenCanvas(w, h);
+  const darkCtx = dark.getContext('2d');
+  if (kind === 'bar') {
+    // A few rows more for the toolbar's soft bottom edge.
+    const bar = Math.round(topBar(data, w, h) * h) + 3;
+    darkCtx.filter = DARK_FILTER;
+    darkCtx.drawImage(bitmap, 0, 0, w, h);
+    darkCtx.filter = 'none';
+    darkCtx.clearRect(0, bar, w, h - bar);
+  } else {
+    const box = sharpBox(data, w, h);
+    if (!box || darkPanelKind(data, w, h) !== 'blur') { bitmap.close(); return null; }
+    // The blur is a washed-out page, mid-gray where it was white, and inverting mid-gray
+    // leaves it mid-gray. Bringing its brightest back up to white first makes it go dark.
+    // Blurred photos would turn into bright negatives, so each pixel gets whichever is
+    // darker, itself or its dark version. Nothing gets brighter and no edges show.
+    const stretch = Math.min(2.4, 255 / peakAround(data, w, h, box));
+    darkCtx.drawImage(bitmap, 0, 0, w, h);
+    darkCtx.globalCompositeOperation = 'darken';
+    darkCtx.filter = `brightness(${stretch.toFixed(2)}) ${DARK_FILTER}`;
+    darkCtx.drawImage(bitmap, 0, 0, w, h);
+    darkCtx.filter = 'none';
+    darkCtx.globalCompositeOperation = 'destination-out';
+    darkCtx.beginPath();
+    darkCtx.roundRect(box.x0, box.y0, box.x1 - box.x0 + 1, box.y1 - box.y0 + 1, Math.min(w, h) * 0.035);
+    darkCtx.fill();
+  }
+  bitmap.close();
+  ctx.drawImage(dark, 0, 0);
+  return dataUrl(await picture.convertToBlob({ type: 'image/webp', quality: 0.9 }));
 }
 
 async function darkenBlob(blob) {

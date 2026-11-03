@@ -26,10 +26,15 @@ async function checkImage(url, fullUrl) {
     if (!res.ok) return null;
     const stats = await analyzeBlob(await res.blob());
     const framed = mayBeFrame(stats);
-    if (!fullUrl || !allowed(fullUrl) || !(framed || mayBePartial(stats))) return stats;
+    const page = framed || mayBePartial(stats);
+    if (!fullUrl || !allowed(fullUrl) || !(page || stats.around)) return stats;
     try {
       const full = await fetch(fullUrl, { credentials: 'omit' });
-      if (full.ok) stats.partial = await partialDarken(await full.blob(), framed ? isFrameScreenshot : undefined);
+      if (full.ok && page) stats.partial = await partialDarken(await full.blob(), framed ? isFrameScreenshot : undefined);
+      else if (full.ok) {
+        stats.partial = await darkenAroundPanel(await full.blob(), stats.around);
+        stats.panelled = !!stats.partial;
+      }
       stats.framed = framed;
     } catch {}
     return stats;

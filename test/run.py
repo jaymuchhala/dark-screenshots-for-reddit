@@ -103,6 +103,10 @@ MAKE = """async () => {
     mk('frame-dark.png', 1200, 800, (x,w,h)=>{ x.fillStyle='#ecece4'; x.fillRect(0,0,w,h); x.fillStyle='#333'; x.font='18px sans-serif'; x.fillText('IMAGE 01',50,30); x.fillStyle='#111'; x.fillRect(50,45,1100,330); x.fillStyle='#333'; x.fillText('IMAGE 02',50,405); x.fillStyle='#111'; x.fillRect(50,420,1100,340); x.fillStyle='#ddd'; x.fillText('Dark panel text',100,120); }),
     mk('neg-caption-bars.png', 1200, 800, (x,w,h)=>{ x.fillStyle='#fff'; x.fillRect(0,0,w,h); x.fillStyle='#111'; x.fillRect(0,110,w,580); x.font='40px sans-serif'; x.fillText('top text',60,70); x.fillText('bottom text',60,760); }),
     mk('partial-lines.png', 1200, 800, (x,w,h)=>{ x.fillStyle='#fff'; x.fillRect(0,0,w,h); x.fillStyle='#222'; x.font='18px sans-serif'; for(let i=0;i<26;i++) x.fillText('Lorem ipsum dolor sit amet, consectetur adipiscing elit',30,430+i*14+(i%2)); noise(x,30,30,400,330,[150,130,110]); noise(x,460,30,400,330,[120,140,150]); x.fillStyle='#14202e'; x.fillRect(900,60,270,360); x.strokeStyle='#888'; x.lineWidth=2; x.strokeRect(10,10,1180,780); for(const y of [20,200,395]){ x.beginPath(); x.moveTo(10,y); x.lineTo(1190,y); x.stroke(); } }),
+    mk('around-blur.png', 1200, 750, (x,w,h)=>{ x.fillStyle='#8c919c'; x.fillRect(0,0,w,h); x.filter='blur(14px)'; x.fillStyle='#3a5a2a'; x.fillRect(40,40,360,300); x.fillStyle='#667'; for(let i=0;i<7;i++) x.fillRect(40,400+i*44,330,18); x.filter='none'; x.fillStyle='#1b2433'; x.beginPath(); x.roundRect(400,60,420,620,24); x.fill(); x.strokeStyle='#aab'; x.lineWidth=2; x.stroke(); x.fillStyle='#eee'; x.font='22px sans-serif'; for(let i=0;i<14;i++) x.fillText('Row of panel text '+i,430,110+i*40); }),
+    mk('around-bar.png', 1200, 750, (x,w,h)=>{ noise(x,0,0,w,h,[90,130,90]); x.fillStyle='#e6eaf2'; x.fillRect(0,0,w,90); x.fillStyle='#14202e'; x.fillRect(720,92,420,600); x.fillStyle='#eee'; x.font='22px sans-serif'; for(let i=0;i<13;i++) x.fillText('Panel row '+i,750,140+i*40); }),
+    mk('neg-portrait.png', 1200, 750, (x,w,h)=>{ x.fillStyle='#8c919c'; x.fillRect(0,0,w,h); x.filter='blur(30px)'; x.fillStyle='#c8b090'; x.fillRect(100,100,300,500); x.filter='none'; x.fillStyle='#402a20'; x.beginPath(); x.ellipse(600,380,190,300,0,0,7); x.fill(); x.fillStyle='#b59a80'; for(let i=0;i<900;i++){ const a=i*2.4, r=Math.sqrt(i/900)*.9; x.fillRect(600+Math.cos(a)*190*r,380+Math.sin(a)*300*r,3,3); } }),
+    mk('neg-meme-dark.png', 900, 800, (x,w,h)=>{ x.fillStyle='#fff'; x.fillRect(0,0,w,h); x.fillStyle='#000'; x.font='44px sans-serif'; x.fillText('caption',40,90); x.fillStyle='#16161c'; x.fillRect(0,150,w,650); }),
     mk('pos-text-ui.png', 900, 500, (x,w,h)=>{ x.fillStyle='#fff'; x.fillRect(0,0,w,h); x.fillStyle='#222'; x.font='18px sans-serif'; for(let i=0;i<20;i++) x.fillText('Lorem ipsum dolor sit amet, consectetur adipiscing elit, sed do eiusmod tempor',20,26+i*24); }),
   ]);
 }"""
@@ -163,6 +167,16 @@ with sync_playwright() as p:
     check('photo stays as it is', 90 < sum(px('partial-photos.png', .2, .25)) / 3 < 200, px('partial-photos.png', .2, .25))
     for f in ('neg-product.jpg', 'neg-meme.jpg', 'neg-white-sky.jpg', 'neg-dark-ui.png'):
         check(f'{f}: not partly dark', not page.locator(f'img[alt="{f}"]').evaluate("el => el.style.content"))
+    for f in ('around-blur.png', 'around-bar.png'):
+        el = page.locator(f'img[alt="{f}"]')
+        el.scroll_into_view_if_needed()
+        check(f'{f}: darkened around the panel', 'url("data:image/webp' in el.evaluate("el => el.style.content"))
+    check('blur goes dark', sum(px('around-blur.png', .95, .5)) / 3 < 70, px('around-blur.png', .95, .5))
+    check('blur: panel stays', px('around-blur.png', .5, .03 + .5)[2] < 90, px('around-blur.png', .5, .53))
+    check('toolbar goes dark', max(px('around-bar.png', .3, .06)) < 60, px('around-bar.png', .3, .06))
+    check('below the toolbar stays', sum(px('around-bar.png', .3, .6)) / 3 > 70, px('around-bar.png', .3, .6))
+    for f in ('neg-portrait.png', 'neg-meme-dark.png', 'neg-paper-photo.jpg', 'photo-Sonoma.jpg', 'photo-iMacBlue.jpg', 'photo-RadialSkyBlue.jpg'):
+        check(f'{f}: nothing darkened around', not page.locator(f'img[alt="{f}"]').evaluate("el => el.style.content"))
     check('nothing left hidden', page.evaluate("[...document.images].every(i => i.style.visibility !== 'hidden')"))
     page.screenshot(path=f'{work}/reader-dark.png', full_page=True)
     page.emulate_media(color_scheme='light')
