@@ -129,10 +129,20 @@
     }
   }, { rootMargin: '600px' });
 
+  // Reddit can restore a feed from a saved copy of its markup, and an image can be
+  // dropped from `tracked` and put back, so an image can arrive with these styles
+  // already on it. Only this script sets them as important.
+  function clearLeftovers(img) {
+    for (const name of ['visibility', 'filter']) {
+      if (img.style.getPropertyPriority(name) === 'important') img.style.removeProperty(name);
+    }
+  }
+
   function track(img) {
     if (!imageUrl(img)) return;
     let state = tracked.get(img);
     if (!state) {
+      clearLeftovers(img);
       state = { hidden: false, darkened: false, filter: '', visibility: '' };
       tracked.set(img, state);
       viewport.observe(img);
@@ -200,9 +210,15 @@
 
   systemDark.addEventListener('change', refreshAll);
 
-  // Lazy images get a final URL from srcset only once they load.
+  // Lazy images get a final URL from srcset only once they load. An image can also
+  // have been too small to check until now, so it needs a fresh look at its size.
   document.addEventListener('load', (e) => {
-    if (e.target.localName === 'img') track(e.target);
+    if (e.target.localName !== 'img') return;
+    if (tracked.has(e.target)) {
+      viewport.unobserve(e.target);
+      viewport.observe(e.target);
+    }
+    track(e.target);
   }, true);
 
   // ---------- Right-click override ----------

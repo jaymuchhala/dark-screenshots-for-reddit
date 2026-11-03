@@ -1,6 +1,6 @@
 # Loads a copy of the extension pointed at localhost and runs it on a mock page.
 # usage: python3 test/run.py <screenshots dir> <work dir>
-import http.server, json, os, shutil, subprocess, sys, threading, functools, glob
+import http.server, json, os, shutil, subprocess, sys, threading, functools, glob, time
 from playwright.sync_api import sync_playwright
 
 ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
@@ -29,6 +29,9 @@ handler.log_message = lambda *a: None
 class Q(http.server.SimpleHTTPRequestHandler):
     def __init__(self, *a, **k): super().__init__(*a, directory=site, **k)
     def log_message(self, *a): pass
+    def do_GET(self):
+        if 'slow' in self.path: time.sleep(.5)
+        super().do_GET()
 srv = http.server.ThreadingHTTPServer(('localhost', 0), Q)
 threading.Thread(target=srv.serve_forever, daemon=True).start()
 base = f'http://localhost:{srv.server_port}'
@@ -97,6 +100,20 @@ with sync_playwright() as p:
     page.wait_for_timeout(1000)
     v = page.locator('#blur').evaluate(FILTERED)
     check('keeps blur', 'blur' in v and 'invert' in v, v)
+
+    # Stuck-hidden cases: each must end up visible with a verdict applied
+    page.evaluate("""() => { const d=document.createElement('div'); d.id='restored'; d.innerHTML = `<img id=saved src="/shot1.png?saved" style="width:300px;visibility:hidden !important;filter:invert(0.93) hue-rotate(180deg) !important">`; document.body.append(d); }""")
+    page.wait_for_timeout(1000)
+    check('restored markup: not hidden', page.locator('#saved').evaluate("el => el.style.visibility") == '')
+    check('restored markup: dark once', page.locator('#saved').evaluate(FILTERED).count('invert') == 1)
+    page.evaluate("""() => { const i=document.getElementById('saved'); i.remove(); return new Promise(r => setTimeout(r, 100)).then(() => document.body.append(i)); }""")
+    page.wait_for_timeout(500)
+    check('re-attached: not hidden', page.locator('#saved').evaluate("el => el.style.visibility") == '')
+    shutil.copy(f'{site}/shot2.png', f'{site}/slow.png')
+    page.evaluate("""() => { const b=document.createElement('div'); b.id='box'; b.style.cssText='height:20px'; const i=new Image(); i.id='late'; i.style.cssText='width:300px;height:100%'; b.append(i); document.body.append(b); i.src='/slow.png'; i.addEventListener('load', () => { b.style.height='200px'; }, {once:true}); }""")
+    page.wait_for_timeout(1500)
+    check('sized after load: not hidden', page.locator('#late').evaluate("el => el.style.visibility") == '')
+    check('sized after load: darkened', 'invert' in page.locator('#late').evaluate(FILTERED))
 
     # Right-click override, message sent the way the menu sends it
     page.locator('img[alt="shot1.png"]').click(button='right')
