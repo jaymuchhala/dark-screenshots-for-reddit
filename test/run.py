@@ -134,7 +134,12 @@ with sync_playwright() as p:
     # Reader
     page.evaluate("""fs => { for (const n of fs) { const i = new Image(); i.src='/'+n; i.alt=n; i.style.width='300px'; i.style.height='200px'; i.style.objectFit='contain'; document.getElementById('f').append(i);} 
        const h=document.createElement('x-host'); document.body.append(h); const s=h.attachShadow({mode:'open'}); const i=new Image(); i.src='/shot3.png'; i.id='shadow'; i.style.width='300px'; s.append(i); }""", files)
-    page.wait_for_timeout(2500)
+    # Some of these also fetch their full size, so how long this takes varies.
+    expected = [f for f in files if f.startswith('shot') or f.startswith('pos')]
+    for _ in range(80):
+        if all(page.locator(f'img[alt="{f}"]').evaluate(FILTERED) for f in expected): break
+        page.wait_for_timeout(100)
+    page.wait_for_timeout(500)
     for f in files:
         v = page.locator(f'img[alt="{f}"]').evaluate(FILTERED)
         check(f'reader dark theme {f}', bool(v) == (f.startswith('shot') or f.startswith('pos')), v)
