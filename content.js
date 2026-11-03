@@ -5,13 +5,13 @@
   const MAX_UPLOAD_BYTES = 30 * 1024 * 1024;
   const MAX_OVERRIDES = 500;
 
-  let settings = { reader: true, readerMode: 'theme', uploader: true };
+  let settings = { reader: true, readerMode: 'theme', uploader: true, tinted: true };
   let overrides = {};
   const systemDark = matchMedia('(prefers-color-scheme: dark)');
 
   // ---------- Reader: darken screenshots already on the page ----------
 
-  const verdicts = new Map();   // image key -> true/false, or a promise while checking
+  const verdicts = new Map();   // image key -> pixel stats or null, or a promise while checking
   const tracked = new Map();    // img -> { hidden, darkened, filter, visibility }
   const observedRoots = new WeakSet();
   let lastRightClicked = null;
@@ -91,9 +91,9 @@
       setDarkened(img, state, false);
       return true;
     }
-    const verdict = verdicts.get(key);
-    if (typeof verdict === 'boolean') {
-      setDarkened(img, state, verdict);
+    const stats = verdicts.get(key);
+    if (stats === null || (stats && !(stats instanceof Promise))) {
+      setDarkened(img, state, !!stats && isLightScreenshot(stats, settings.tinted));
       setHidden(img, state, false);
       return true;
     }
@@ -104,9 +104,9 @@
     const key = imageKey(url);
     if (verdicts.has(key)) return verdicts.get(key);
     const pending = chrome.runtime.sendMessage({ type: 'check-image', url: smallestUrl(img, url) })
-      .catch(() => false)
+      .catch(() => null)
       .then((result) => {
-        verdicts.set(key, !!result);
+        verdicts.set(key, result || null);
         for (const other of tracked.keys()) render(other);
       });
     verdicts.set(key, pending);
@@ -304,7 +304,7 @@
       // GIFs would lose their animation.
       if (!/^image\/(png|jpeg|webp)$/.test(file.type) || file.size > MAX_UPLOAD_BYTES) return file;
       try {
-        if (!(await analyzeBlob(file)).screenshot) return file;
+        if (!isLightScreenshot(await analyzeBlob(file), settings.tinted)) return file;
         const dark = await darkenBlob(file);
         changed++;
         return new File([dark], file.name, { type: dark.type, lastModified: file.lastModified });

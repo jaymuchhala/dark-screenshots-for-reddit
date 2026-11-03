@@ -20,11 +20,11 @@ async function withSlot(job) {
 
 // The page can't read the pixels of images from another host, but the worker can.
 async function checkImage(url) {
-  if (!IMAGE_HOSTS.has(new URL(url).hostname)) return false;
+  if (!IMAGE_HOSTS.has(new URL(url).hostname)) return null;
   return withSlot(async () => {
     const res = await fetch(url, { credentials: 'omit' });
-    if (!res.ok) return false;
-    return (await analyzeBlob(await res.blob())).screenshot;
+    if (!res.ok) return null;
+    return analyzeBlob(await res.blob());
   });
 }
 
@@ -48,7 +48,7 @@ chrome.runtime.onMessage.addListener((msg, sender, reply) => {
   if (msg.type === 'check-build') checkBuild();
   if (msg.type === 'menu-visible') chrome.contextMenus.update(MENU_ID, { visible: msg.visible }).catch(() => {});
   if (msg.type !== 'check-image') return;
-  checkImage(msg.url).then(reply, () => reply(false));
+  checkImage(msg.url).then(reply, () => reply(null));
   return true;
 });
 

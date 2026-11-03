@@ -32,4 +32,8 @@ p { margin: 12px 0 0; padding-top: 10px; border-top: 1px solid var(--line); colo
 .switch:checked { background: var(--accent); }
 .switch:checked::after { transform: translateX(14px); }
 .switch:focus-visible { outline: 2px solid var(--accent); outline-offset: 2px; }
+.minor { color: var(--muted); font-size: 12px; }
+.minor .switch { width: 26px; height: 16px; }
+.minor .switch::after { width: 12px; height: 12px; }
+.minor .switch:checked::after { transform: translateX(10px); }
 @media (prefers-reduced-motion: reduce) { .switch, .switch::after { transition: none; } }

@@ -76,7 +76,7 @@ with sync_playwright() as p:
     sw = ctx.service_workers[0] if ctx.service_workers else ctx.wait_for_event('serviceworker')
     print(f'{"image":28} light  flat  color  verdict')
     for f in files:
-        r = sw.evaluate("async u => analyzeBlob(await (await fetch(u)).blob())", f'{base}/{f}')
+        r = sw.evaluate("async u => { const s = await analyzeBlob(await (await fetch(u)).blob()); return { ...s, screenshot: isLightScreenshot(s, true) }; }", f'{base}/{f}')
         print(f'{f:28} {r["light"]:.2f}   {r["flat"]:.2f}  {r["colorful"]:.2f}   {r["screenshot"]}')
         check(f'detector {f}', r['screenshot'] == (f.startswith('shot') or f.startswith('pos')))
 
@@ -126,6 +126,13 @@ with sync_playwright() as p:
     sw.evaluate("async () => { for (const t of await chrome.tabs.query({})) chrome.tabs.sendMessage(t.id, {type:'toggle-image'}).catch(()=>{}); }")
     page.wait_for_timeout(300)
     check('override turns it on', 'invert' in page.locator('img[alt="shot1.png"]').evaluate(FILTERED))
+
+    # Tinted setting: live, without a new fetch, and white screenshots aren't affected
+    sw.evaluate("chrome.storage.local.set({settings:{tinted:false}})"); page.wait_for_timeout(300)
+    check('tinted off leaves the cream chart', not page.locator('img[alt="pos-cream-chart.png"]').evaluate(FILTERED))
+    check('tinted off still darkens white', 'invert' in page.locator('img[alt="shot1.png"]').evaluate(FILTERED))
+    sw.evaluate("chrome.storage.local.set({settings:{tinted:true}})"); page.wait_for_timeout(300)
+    check('tinted on darkens the cream chart', 'invert' in page.locator('img[alt="pos-cream-chart.png"]').evaluate(FILTERED))
 
     # Right-click with a full-card link over the image, as on Reddit's feed
     page.evaluate("""() => { const d=document.createElement('div'); d.id='card'; d.style.cssText='position:relative;width:300px;height:200px';
@@ -216,7 +223,7 @@ with sync_playwright() as p:
 
     # Popup
     extid = sw.url.split('/')[2]
-    pop = ctx.new_page(); pop.set_viewport_size({'width': 300, 'height': 330}); pop.emulate_media(color_scheme='dark')
+    pop = ctx.new_page(); pop.set_viewport_size({'width': 300, 'height': 370}); pop.emulate_media(color_scheme='dark')
     pop.goto(f'chrome-extension://{extid}/popup/popup.html'); pop.wait_for_timeout(300)
     pop.screenshot(path=f'{work}/popup.png')
 
