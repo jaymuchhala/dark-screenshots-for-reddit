@@ -389,7 +389,7 @@ with sync_playwright() as p:
     check('photo video: bars untouched', bar('photo') <= 40, bar('photo'))
 
     # A reload knows the verdict: the video never shows unfiltered, however late the player draws it.
-    check('verdict saved for the reload', any(k.endswith('/vid-late.webm') and v for k, v in sw.evaluate("chrome.storage.local.get('videoVerdicts')")['videoVerdicts'].items()))
+    check('verdict saved for the reload', any(k.endswith('/vid-late.webm') and v for k, v in sw.evaluate("chrome.storage.local.get('videoChecks')")['videoChecks'].items()))
     again = ctx.new_page(); again.goto(base + '/index.html'); again.wait_for_timeout(200)
     again.evaluate(ADD, ['re', {'preview': f'{media}/vid-late.webm'}, True])
     again.evaluate("""() => { window.flashes = 0; const p = document.getElementById('re');

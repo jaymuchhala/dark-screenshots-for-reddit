@@ -7,6 +7,9 @@
   const MAX_VIDEO_CHECKS = 2;
   const PLAYER_TRIES = 100, PLAYER_RETRY_MS = 100;
   const VIDEO_REVEAL_AFTER_MS = 6000;
+  const PARTS = 'parts';
+  const PARTS_CHECK_MS = 100;
+  const PARTS_MIN_HEIGHT = 270;
   const MAX_SAVED_VIDEOS = 500;
 
   let settings = { reader: true, readerMode: 'theme', videos: false, frames: true, uploader: true, tinted: true };
@@ -19,6 +22,7 @@
   const verdicts = new Map();   // image key -> pixel stats or null, or a promise while checking
   const tracked = new Map();    // img -> { hidden, darkened, filter, visibility }
   const players = new Map();    // video player -> { hidden, visibility, timer, expired }
+  const partVideos = new Map(); // video darkened in parts -> { ready, stop }
   const observedRoots = new WeakSet();
   let lastRightClicked = null;
 
@@ -30,14 +34,31 @@
   // its pixels. GIF posts have no preview, but their own file is readable. The scrubber's
   // thumbnail is a few shadow roots further in, and shares the verdict of its player.
   function videoUrl(video) {
-    let player = video.getRootNode().host;
-    while (player && !isPlayer(player)) player = player.getRootNode().host;
+    const player = playerOf(video);
     return player ? playerUrl(player) : null;
+  }
+
+  function playerOf(el) {
+    let player = el;
+    while (player && !isPlayer(player)) player = player.getRootNode().host;
+    return player;
   }
 
   const playerUrl = (player) => player.getAttribute('preview') || (player.hasAttribute('gif') && player.getAttribute('src')) || null;
 
   const isPlayer = (el) => el.localName === 'shreddit-player' || el.localName === 'shreddit-player-2';
+
+  // The preview is too small to find the edges of a panel. The player's own <video> can't
+  // be read, but the same files load fine with CORS.
+  function largerUrl(player) {
+    try {
+      const sources = JSON.parse(player.getAttribute('packaged-media-json')).playbackMp4s.permutations.map((p) => p.source);
+      const big = sources.filter((s) => Math.min(s.dimensions.width, s.dimensions.height) >= PARTS_MIN_HEIGHT);
+      return big.sort((a, b) => a.bitrateBps - b.bitrateBps)[0]?.url || null;
+    } catch {
+      return null;
+    }
+  }
 
   // The elements between the player and the scrubber's thumbnail.
   const PLAYER_PARTS = new Set(['shreddit-media-ui', 'shreddit-progress-bar', 'shreddit-preview-video-lazy']);
@@ -96,7 +117,9 @@
   function setDarkened(img, state, dark, picture = null) {
     if (!dark) picture = null;
     if (state.darkened === dark && state.picture === picture) return;
-    if (state.picture) {
+    if (state.picture === PARTS) {
+      stopParts(img);
+    } else if (state.picture) {
       img.style.removeProperty('content');
     } else if (state.darkened) {
       img.style.removeProperty('filter');
@@ -108,7 +131,9 @@
     }
     state.darkened = dark;
     state.picture = picture;
-    if (picture) {
+    if (picture === PARTS) {
+      startParts(img);
+    } else if (picture) {
       img.style.setProperty('content', `url("${picture}")`, 'important');
     } else if (dark) {
       state.filter = img.style.getPropertyValue('filter');
@@ -124,6 +149,98 @@
     }
   }
 
+  // A filter on an element over the video darkens what's behind it, so only the light
+  // parts turn dark and the footage stays. It sits under the player's controls. What it
+  // covers comes from a hidden copy of the video, played along with the real one.
+  function startParts(video) {
+    const player = video.getRootNode().host;
+    if (!player || !isPlayer(player)) return;
+    const url = largerUrl(player);
+    if (!url) return;
+    video.parentNode.querySelector('[data-dark-parts]')?.remove();
+    const cover = document.createElement('div');
+    cover.setAttribute('data-dark-parts', '');
+    cover.style.cssText = `position:absolute;left:0;top:0;pointer-events:none;display:none;backdrop-filter:${DARK_FILTER}`;
+    video.after(cover);
+    const copy = document.createElement('video');
+    copy.crossOrigin = 'anonymous';
+    copy.muted = true;
+    copy.preload = 'auto';
+    copy.src = url;
+    let ctx = null, regions = [], checked = false, left = 0, top = 0;
+
+    const finish = () => {
+      if (state.ready) return;
+      state.ready = true;
+      updatePlayer(player);
+    };
+
+    const paint = () => {
+      const box = video.getBoundingClientRect(), at = cover.getBoundingClientRect();
+      // The cover's containing block isn't known, so it's moved by however far off it is.
+      if (Math.abs(box.left - at.left) > 0.5) left += box.left - at.left;
+      if (Math.abs(box.top - at.top) > 0.5) top += box.top - at.top;
+      const shown = regions.filter((r) => r.seen >= 2);
+      const scale = Math.min(box.width / ctx.canvas.width, box.height / ctx.canvas.height);
+      const padX = (box.width - ctx.canvas.width * scale) / 2, padY = (box.height - ctx.canvas.height * scale) / 2;
+      // Clockwise boxes and counter-clockwise holes, so boxes that touch don't cancel out.
+      const path = shown.map((r) => {
+        const x = padX + r.x * scale - 1, y = padY + r.y * scale - 1, w = r.w * scale + 2, h = r.h * scale + 2;
+        return `M${x} ${y}h${w}v${h}h${-w}z` + r.holes.map((hole) =>
+          `M${padX + hole.x * scale} ${padY + hole.y * scale}v${hole.h * scale}h${hole.w * scale}v${-hole.h * scale}z`).join('');
+      }).join('');
+      cover.style.cssText = `position:absolute;left:${left}px;top:${top}px;width:${box.width}px;height:${box.height}px;` +
+        `pointer-events:none;display:${path ? 'block' : 'none'};backdrop-filter:${DARK_FILTER};clip-path:path("${path}")`;
+    };
+
+    const look = () => {
+      if (copy.readyState < 2 || copy.seeking || !copy.videoWidth) return;
+      const scale = Math.min(1, VIDEO_PART_SIZE / Math.max(copy.videoWidth, copy.videoHeight));
+      ctx ??= new OffscreenCanvas(Math.round(copy.videoWidth * scale), Math.round(copy.videoHeight * scale)).getContext('2d', { willReadFrequently: true });
+      const { width, height } = ctx.canvas;
+      ctx.drawImage(copy, 0, 0, width, height);
+      regions = steadyRegions(regions, lightRegions(ctx.getImageData(0, 0, width, height).data, width, height), !checked);
+      checked = true;
+      paint();
+      finish();
+    };
+
+    const tick = () => {
+      const box = video.getBoundingClientRect();
+      if (document.hidden || box.bottom < 0 || box.top > innerHeight) return copy.pause();
+      const behind = video.currentTime - copy.currentTime;
+      if (Math.abs(behind) > 0.3) copy.currentTime = video.currentTime;
+      if (video.paused) {
+        copy.pause();
+        if (Math.abs(behind) <= 0.3) look();
+        return;
+      }
+      // A small nudge catches up without the stall of a seek.
+      copy.playbackRate = video.playbackRate * (1 + Math.max(-0.1, Math.min(0.1, behind)));
+      if (copy.paused) copy.play().catch(() => {});
+      look();
+    };
+
+    const timer = setInterval(tick, PARTS_CHECK_MS);
+    copy.addEventListener('seeked', look);
+    // A link can expire, and these files only allow www.reddit.com. Then the video stays as it is.
+    copy.addEventListener('error', () => {
+      stop();
+      finish();
+    });
+    const stop = () => {
+      clearInterval(timer);
+      copy.removeAttribute('src');
+      copy.load();
+      cover.remove();
+      if (partVideos.get(video) === state) partVideos.delete(video);
+    };
+    const state = { ready: false, stop };
+    partVideos.set(video, state);
+  }
+
+  const stopParts = (video) => partVideos.get(video)?.stop();
+
   // Applies what's known about an image. Returns false if its verdict is still needed.
   function render(img) {
     const state = tracked.get(img);
@@ -137,7 +254,8 @@
     const key = imageKey(url);
     if (key in overrides) {
       setHidden(img, state, false);
-      setDarkened(img, state, overrides[key], verdicts.get(key)?.partial || null);
+      const known = verdicts.get(key);
+      setDarkened(img, state, overrides[key], known === PARTS ? PARTS : known?.partial || null);
       return true;
     }
     if (!readerActive(img)) {
@@ -148,7 +266,7 @@
     const stats = verdicts.get(key);
     if (stats === null || (stats && !(stats instanceof Promise))) {
       // A video's verdict is already true or null. An image's depends on the settings.
-      const picture = usesPartial(stats, settings.tinted, settings.frames) ? stats.partial : null;
+      const picture = stats === PARTS ? PARTS : usesPartial(stats, settings.tinted, settings.frames) ? stats.partial : null;
       setDarkened(img, state, stats === true || !!picture || (!!stats && isLightScreenshot(stats, settings.tinted)), picture);
       setHidden(img, state, false);
       return true;
@@ -172,7 +290,8 @@
     const key = imageKey(playerUrl(player));
     const dark = key in overrides ? overrides[key] : readerActive(player) && verdicts.get(key) !== null;
     const video = player.shadowRoot?.querySelector('video');
-    const hold = dark && !tracked.get(video)?.darkened && !state.expired;
+    const ready = tracked.get(video)?.darkened && partVideos.get(video)?.ready !== false;
+    const hold = dark && !ready && !state.expired;
     setHidden(player, state, hold);
     player.toggleAttribute('data-applying-dark', hold);   // Shows the animated icon in content.css.
   }
@@ -195,13 +314,13 @@
     const key = imageKey(url);
     if (verdicts.has(key)) return verdicts.get(key);
     const check = img.localName !== 'img'
-      ? withVideoSlot(() => isLightVideo(url))
+      ? withVideoSlot(() => checkVideo(url, largerUrl(playerOf(img))))
       : chrome.runtime.sendMessage({ type: 'check-image', url: smallestUrl(img, url), fullUrl: largestUrl(img, url) });
     const pending = check
       .catch(() => null)
       .then((result) => {
         verdicts.set(key, result || null);
-        if (typeof result === 'boolean') saveVideoVerdict(key, result);
+        if (img.localName !== 'img' && result !== null) saveVideoVerdict(key, result);
         for (const other of tracked.keys()) render(other);
         for (const player of players.keys()) updatePlayer(player);
       });
@@ -213,7 +332,7 @@
     savedVideos[key] = verdict;
     const keys = Object.keys(savedVideos);
     if (keys.length > MAX_SAVED_VIDEOS) delete savedVideos[keys[0]];
-    chrome.storage.local.set({ videoVerdicts: savedVideos });
+    chrome.storage.local.set({ videoChecks: savedVideos });
   }
 
   const viewport = new IntersectionObserver((entries) => {
@@ -295,6 +414,7 @@
   function prune() {
     for (const img of tracked.keys()) {
       if (!img.isConnected) {
+        stopParts(img);
         viewport.unobserve(img);
         tracked.delete(img);
       }
@@ -476,17 +596,19 @@
 
   chrome.storage.onChanged.addListener((changes, area) => {
     if (area !== 'local') return;
-    if (changes.videoVerdicts) savedVideos = changes.videoVerdicts.newValue || {};
+    if (changes.videoChecks) savedVideos = changes.videoChecks.newValue || {};
     if (!changes.settings && !changes.overrides) return;
     if (changes.settings) settings = { ...settings, ...changes.settings.newValue };
     if (changes.overrides) overrides = changes.overrides.newValue || {};
     refreshAll();
   });
 
-  chrome.storage.local.get(['settings', 'overrides', 'videoVerdicts']).then((stored) => {
+  // Verdicts from before videos could be darkened in parts have to be checked again.
+  chrome.storage.local.remove('videoVerdicts');
+  chrome.storage.local.get(['settings', 'overrides', 'videoChecks']).then((stored) => {
     settings = { ...settings, ...stored.settings };
     overrides = stored.overrides || {};
-    savedVideos = stored.videoVerdicts || {};
+    savedVideos = stored.videoChecks || {};
     for (const [key, verdict] of Object.entries(savedVideos)) verdicts.set(key, verdict || null);
     watchRoot(document);
   });

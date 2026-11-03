@@ -45,12 +45,16 @@ function isLightVideoFrame({ light, flat, colorful }) {
 }
 
 const VIDEO_SAMPLES = 5;
+const VIDEO_PART_SAMPLES = 12;
+const VIDEO_PART_SHARE = 0.1;
+const VIDEO_PART_HITS = 3;
+const VIDEO_PART_SIZE = 480;
 const VIDEO_TIMEOUT_MS = 15000;
 
 // Page only: the worker has no video element. Samples frames across the whole video,
 // because a poster or a single frame can be a white title card on real-life footage.
-// One frame may differ, for an intro or an outro.
-async function isLightVideo(url) {
+// Returns how many frames `look(data, w, h)` said yes to.
+async function countVideoFrames(url, samples, size, look) {
   const video = document.createElement('video');
   video.crossOrigin = 'anonymous';
   video.muted = true;
@@ -63,20 +67,20 @@ async function isLightVideo(url) {
     const ready = reached('loadedmetadata');
     video.src = url;
     await ready;
-    if (!Number.isFinite(video.duration) || !video.videoWidth) return false;
-    const scale = Math.min(1, SAMPLE_SIZE / Math.max(video.videoWidth, video.videoHeight));
+    if (!Number.isFinite(video.duration) || !video.videoWidth) return 0;
+    const scale = Math.min(1, size / Math.max(video.videoWidth, video.videoHeight));
     const w = Math.max(1, Math.round(video.videoWidth * scale));
     const h = Math.max(1, Math.round(video.videoHeight * scale));
     const ctx = new OffscreenCanvas(w, h).getContext('2d', { willReadFrequently: true });
     let hits = 0;
-    for (let i = 0; i < VIDEO_SAMPLES; i++) {
+    for (let i = 0; i < samples; i++) {
       const seeked = reached('seeked');
-      video.currentTime = video.duration * (i + 0.5) / VIDEO_SAMPLES;
+      video.currentTime = video.duration * (i + 0.5) / samples;
       await seeked;
       ctx.drawImage(video, 0, 0, w, h);
-      if (isLightVideoFrame(measure(ctx.getImageData(0, 0, w, h).data, w, h))) hits++;
+      if (look(ctx.getImageData(0, 0, w, h).data, w, h)) hits++;
     }
-    return hits >= VIDEO_SAMPLES - 1;
+    return hits;
   };
   let timer;
   try {
@@ -89,6 +93,19 @@ async function isLightVideo(url) {
     video.removeAttribute('src');
     video.load();
   }
+}
+
+const countPartFrames = (url, size) => countVideoFrames(url, VIDEO_PART_SAMPLES, size, (data, w, h) =>
+  lightRegions(data, w, h).reduce((total, r) => total + r.w * r.h, 0) >= w * h * VIDEO_PART_SHARE);
+
+// True if the whole video is light UI, 'parts' if it has light UI over other footage,
+// false if neither. One frame may differ, for an intro or an outro. The tiny preview only
+// rules videos out for the parts check, since panels lose their edges at that size.
+async function checkVideo(previewUrl, largerUrl) {
+  const hits = await countVideoFrames(previewUrl, VIDEO_SAMPLES, SAMPLE_SIZE, (data, w, h) => isLightVideoFrame(measure(data, w, h)));
+  if (hits >= VIDEO_SAMPLES - 1) return true;
+  if (!largerUrl || !await countPartFrames(previewUrl, SAMPLE_SIZE)) return false;
+  return await countPartFrames(largerUrl, VIDEO_PART_SIZE) >= VIDEO_PART_HITS ? 'parts' : false;
 }
 
 async function analyzeBlob(blob) {
@@ -313,6 +330,206 @@ async function partialDarken(blob, accepts = isPartialScreenshot) {
     reader.onerror = reject;
     reader.readAsDataURL(out);
   });
+}
+
+// A video can show light UI, like a browser window or an extension's popup, over
+// footage. Inverting the whole video would turn the footage into a negative, so only
+// those parts get darkened. They're rectangles with straight edges and text or icons
+// on them, which pale areas in footage rarely are.
+const REGION_MIN_AREA = 0.012;
+const REGION_MIN_WIDTH = 0.1;
+const REGION_MIN_HEIGHT = 0.035;
+const REGION_HOLE = 0.025;
+
+// Returns [{ x, y, w, h, holes: [{ x, y, w, h }] }] in pixels of the frame. Holes are big
+// things on the UI, like a video on a light page or a dark label, that stay as they are.
+function lightRegions(data, width, height) {
+  const n = width * height;
+  const pale = new Uint8Array(n);
+  for (let i = 0; i < n; i++) {
+    const r = data[i * 4], g = data[i * 4 + 1], b = data[i * 4 + 2];
+    if (0.299 * r + 0.587 * g + 0.114 * b >= 205 && Math.max(r, g, b) - Math.min(r, g, b) <= 48) pale[i] = 1;
+  }
+  const line = width + 1, sum = new Int32Array(line * (height + 1));
+  for (let y = 0; y < height; y++) {
+    for (let x = 0; x < width; x++) {
+      sum[(y + 1) * line + x + 1] = pale[y * width + x] + sum[y * line + x + 1] + sum[(y + 1) * line + x] - sum[y * line + x];
+    }
+  }
+  const paleIn = (x0, y0, x1, y1) => sum[(y1 + 1) * line + x1 + 1] - sum[y0 * line + x1 + 1] - sum[(y1 + 1) * line + x0] + sum[y0 * line + x0];
+  const lefts = regionSides(pale, width, height, -1), rights = regionSides(pale, width, height, 1);
+  const found = [];
+  for (const l of lefts) {
+    for (const r of rights) {
+      const w = r.x - l.x + 1;
+      if (w < width * REGION_MIN_WIDTH) continue;
+      const top = Math.max(l.top, r.top), bottom = Math.min(l.bottom, r.bottom);
+      if (bottom - top + 1 < height * REGION_MIN_HEIGHT) continue;
+      // Rows that are mostly pale. Rows of text or a selected row can dip below that.
+      let y0 = -1, y1 = -1, best = 0;
+      for (let y = top, start = -1, last = -1; y <= bottom; y++) {
+        if (paleIn(l.x, y, r.x, y) < w * 0.5) continue;
+        if (start < 0 || y - last > height * 0.04) start = y;
+        last = y;
+        if (last - start > best) { best = last - start; y0 = start; y1 = last; }
+      }
+      if (y0 >= 0 && (y1 - y0 + 1) >= height * REGION_MIN_HEIGHT && w * (y1 - y0 + 1) >= n * REGION_MIN_AREA) found.push({ x: l.x, y: y0, w, h: y1 - y0 + 1 });
+    }
+  }
+  found.sort((p, q) => q.w * q.h - p.w * p.h);
+  const regions = [];
+  for (const box of found) {
+    const grown = growRegion(box, width, height, paleIn);
+    if (regions.some((r) => overlap(r, grown) > grown.w * grown.h * 0.6)) continue;
+    if (finishRegion(grown, data, pale, width, height)) regions.push(grown);
+    if (regions.length === 6) break;
+  }
+  // Merging goes last, with a fresh look at what came of it.
+  return mergeRegions(regions, width, height).filter((box) => finishRegion(box, data, pale, width, height));
+}
+
+// A dark row, like the selected one in a list, can cut a panel in two.
+function mergeRegions(regions, width, height) {
+  const near = Math.max(2, Math.round(width * 0.008)), gap = height * 0.12;
+  for (let merged = true; merged;) {
+    merged = false;
+    for (let i = 0; i < regions.length && !merged; i++) {
+      for (let j = i + 1; j < regions.length && !merged; j++) {
+        const a = regions[i], b = regions[j];
+        if (Math.abs(a.x - b.x) > near || Math.abs(a.x + a.w - b.x - b.w) > near) continue;
+        const top = Math.min(a.y, b.y), bottom = Math.max(a.y + a.h, b.y + b.h);
+        if (bottom - top > a.h + b.h + gap) continue;
+        const x = Math.min(a.x, b.x);
+        regions[i] = { x, y: top, w: Math.max(a.x + a.w, b.x + b.w) - x, h: bottom - top };
+        regions.splice(j, 1);
+        merged = true;
+      }
+    }
+  }
+  return regions;
+}
+
+const overlap = (a, b) => Math.max(0, Math.min(a.x + a.w, b.x + b.w) - Math.max(a.x, b.x)) *
+  Math.max(0, Math.min(a.y + a.h, b.y + b.h) - Math.max(a.y, b.y));
+
+// Long straight lines where pale pixels stop, which panels have and pale areas in footage
+// rarely do. `side` is -1 for left sides and 1 for right sides. The edge of the frame
+// counts as a place to stop. Something pale touching a panel only leaves a gap in the line.
+function regionSides(pale, width, height, side) {
+  const OUT = 2, minRows = Math.ceil(height * REGION_MIN_HEIGHT), maxGap = Math.round(height * 0.1);
+  const sides = [];
+  for (let x = 0; x < width; x++) {
+    let top = -1, last = -1, on = 0;
+    const finish = () => {
+      if (top >= 0 && on >= minRows && on >= (last - top + 1) * 0.6) sides.push({ x, top, bottom: last, on });
+      top = -1;
+      on = 0;
+    };
+    for (let y = 0; y < height; y++) {
+      const out = x + side * OUT;
+      const stops = pale[y * width + x] && (out < 0 || out >= width || !pale[y * width + out]);
+      if (!stops) continue;
+      if (top >= 0 && y - last > maxGap) finish();
+      if (top < 0) top = y;
+      last = y;
+      on++;
+    }
+    finish();
+  }
+  // Neighboring columns see the same line, blurred. The longest stands for them.
+  sides.sort((a, b) => b.on - a.on);
+  const kept = [];
+  for (const candidate of sides) {
+    if (!kept.some((k) => Math.abs(k.x - candidate.x) <= 3 && k.top <= candidate.bottom && candidate.top <= k.bottom)) kept.push(candidate);
+    if (kept.length === 12) break;
+  }
+  return kept;
+}
+
+// Corners are rounded and rows at the ends can be thin, so the box grows while the next
+// line out is still mostly pale.
+function growRegion({ x, y, w, h }, width, height, paleIn) {
+  const fits = (x0, y0, x1, y1) => x0 >= 0 && y0 >= 0 && x1 < width && y1 < height && paleIn(x0, y0, x1, y1) >= (x1 - x0 + 1) * (y1 - y0 + 1) * 0.5;
+  let x0 = x, y0 = y, x1 = x + w - 1, y1 = y + h - 1, moved = true;
+  while (moved) {
+    moved = false;
+    if (fits(x0 - 1, y0, x0 - 1, y1)) { x0--; moved = true; }
+    if (fits(x1 + 1, y0, x1 + 1, y1)) { x1++; moved = true; }
+    if (fits(x0, y0 - 1, x1, y0 - 1)) { y0--; moved = true; }
+    if (fits(x0, y1 + 1, x1, y1 + 1)) { y1++; moved = true; }
+  }
+  return { x: x0, y: y0, w: x1 - x0 + 1, h: y1 - y0 + 1 };
+}
+
+// Finds a region's holes, then returns whether it looks like UI: mostly pale and flat,
+// with some text or icons on it.
+function finishRegion(box, data, pale, width, height) {
+  const { x, y, w, h } = box, area = w * h;
+  let other = new Uint8Array(area);
+  for (let v = 0; v < h; v++) for (let u = 0; u < w; u++) other[v * w + u] = pale[(y + v) * width + x + u] ? 0 : 1;
+  const ink = other.slice();
+  for (let i = 0; i < 2; i++) other = shrunk(other, w);
+  const holes = [];
+  const queue = new Int32Array(area);
+  eachGroup(other, w, queue, (start, end) => {
+    if (end - start < area * REGION_HOLE) return;
+    let x0 = w, y0 = h, x1 = 0, y1 = 0;
+    for (let i = start; i < end; i++) {
+      const u = queue[i] % w, v = (queue[i] - u) / w;
+      if (u < x0) x0 = u;
+      if (u > x1) x1 = u;
+      if (v < y0) y0 = v;
+      if (v > y1) y1 = v;
+    }
+    // Takes back what shrinking took off.
+    x0 = Math.max(0, x0 - 2); y0 = Math.max(0, y0 - 2); x1 = Math.min(w - 1, x1 + 2); y1 = Math.min(h - 1, y1 + 2);
+    if (end - start < (x1 - x0 + 1) * (y1 - y0 + 1) * 0.6) return;
+    holes.push({ x: x + x0, y: y + y0, w: x1 - x0 + 1, h: y1 - y0 + 1 });
+    for (let v = y0; v <= y1; v++) ink.fill(2, v * w + x0, v * w + x1 + 1);
+  });
+  let open = 0;
+  for (let i = 0; i < area; i++) if (ink[i] !== 2) open++;
+  if (open < area * 0.25) return false;
+  let marks = 0, palePixels = 0, flat = 0;
+  const colors = new Map();
+  for (let v = 0; v < h; v++) {
+    for (let u = 0; u < w; u++) {
+      if (ink[v * w + u] === 2) continue;
+      if (ink[v * w + u]) marks++;
+      const c = (y + v) * width + x + u;
+      if (!pale[c]) continue;
+      palePixels++;
+      const i = c * 4, color = (data[i] >> 2) << 12 | (data[i + 1] >> 2) << 6 | (data[i + 2] >> 2);
+      colors.set(color, (colors.get(color) || 0) + 1);
+      const right = u + 1 < w ? i + 4 : i, down = v + 1 < h ? i + width * 4 : i;
+      if (Math.abs(data[i] - data[right]) + Math.abs(data[i + 1] - data[right + 1]) + Math.abs(data[i + 2] - data[right + 2]) +
+        Math.abs(data[i] - data[down]) + Math.abs(data[i + 1] - data[down + 1]) + Math.abs(data[i + 2] - data[down + 2]) <= 6) flat++;
+    }
+  }
+  box.holes = holes;
+  box.fill = palePixels / open;
+  box.flat = flat / palePixels;
+  box.ink = marks / open;
+  // UI is a color or two. Pale ground in footage spreads over many, and a pale sky with
+  // things in front of it is only a bit tidier than that.
+  box.colors = [...colors.values()].sort((p, q) => q - p).slice(0, 2).reduce((total, count) => total + count, 0) / palePixels;
+  return box.fill >= 0.6 && box.flat >= 0.5 && box.ink >= 0.01 && box.colors >= 0.27 && (box.colors >= 0.4 || box.ink < 0.15);
+}
+
+// Keeps regions from flickering from one check to the next: a box that barely moved stays
+// where it was, a new one waits for a second look, and one that's gone gets one more.
+function steadyRegions(previous, found, first) {
+  const steady = found.map((box) => {
+    const known = previous.find((old) => overlap(old, box) >= Math.min(old.w * old.h, box.w * box.h) * 0.7);
+    if (!known) return { ...box, seen: first ? 2 : 1, missed: 0 };
+    const still = Math.abs(known.x - box.x) <= 1 && Math.abs(known.y - box.y) <= 1 &&
+      Math.abs(known.w - box.w) <= 2 && Math.abs(known.h - box.h) <= 2;
+    return { ...box, ...(still ? { x: known.x, y: known.y, w: known.w, h: known.h } : {}), seen: known.seen + 1, missed: 0 };
+  });
+  for (const old of previous) {
+    if (old.missed < 1 && old.seen >= 2 && !steady.some((box) => overlap(old, box) > 0)) steady.push({ ...old, missed: old.missed + 1 });
+  }
+  return steady;
 }
 
 async function darkenBlob(blob) {
