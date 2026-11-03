@@ -15,7 +15,7 @@ Download this repo (Code, then Download ZIP) and unzip it, or clone it. Open `ch
 
 ## Test
 
-`test/run.py` runs a copy of the extension on a localhost mock page in Playwright's Chromium. It takes a folder of light screenshots named `1.png` to `4.png` and an empty work folder.
+`test/run.py` runs a copy of the extension on a localhost mock page in Playwright's Chromium. It needs light screenshots named `1.png` to `4.png` in `test/shots`, which isn't committed. Name sections to run only those: `python3 test/run.py video`. The sections are `detector`, `reader`, `upload`, `video` and `popup`.
 
 ## License
 
