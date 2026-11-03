@@ -5,6 +5,11 @@
 const DARK_FILTER = 'invert(0.93) hue-rotate(180deg)';
 
 const SAMPLE_SIZE = 320;
+const PHOTO_MIN_COLORS = 8;
+const PHOTO_MIN_GROUP = 0.0015;
+const PHOTO_MAX = 0.003;
+const FLAT_PAGE_MIN = 0.22;
+const FLAT_WHOLE_MIN = 0.45;
 
 // Decides from pixels whether an image is a light-theme screenshot. Screenshots are
 // mostly flat, pale areas, white or (with the tinted setting) lightly tinted like a
@@ -34,16 +39,19 @@ function measure(data, width, height) {
   return { light: light / total, tinted: tinted / total, flat: flat / total, colorful: colorful / total, dark: dark / total };
 }
 
-function isLightScreenshot({ light, tinted, flat, colorful }, allowTinted) {
+function isLightScreenshot({ light, tinted, flat, colorful, photo = 0, flatPage = 1 }, allowTinted) {
+  if (photo > PHOTO_MAX || flatPage < FLAT_WHOLE_MIN) return false;
   // Tinted backgrounds often come with charts, which have more color on them.
   return (allowTinted ? tinted : light) >= 0.5 && flat >= 0.55 && colorful <= (allowTinted ? 0.25 : 0.15);
 }
 
 // Video previews are tiny (about 170x96), so text blurs and less of a frame is flat.
-function isLightVideoFrame({ light, flat, colorful }) {
-  return light >= 0.55 && flat >= 0.4 && colorful <= 0.15;
+// A frame's text is mush at that size, so a little of it can pass for photo.
+function isLightVideoFrame({ light, flat, colorful, photo = 0, flatPage = 1 }) {
+  return light >= 0.55 && flat >= 0.4 && colorful <= 0.15 && photo <= VIDEO_PHOTO_MAX && flatPage >= FLAT_WHOLE_MIN;
 }
 
+const VIDEO_PHOTO_MAX = 0.05;
 const VIDEO_SAMPLES = 5;
 const VIDEO_PART_SAMPLES = 12;
 const VIDEO_PART_SHARE = 0.1;
@@ -102,10 +110,52 @@ const countPartFrames = (url, size) => countVideoFrames(url, VIDEO_PART_SAMPLES,
 // false if neither. One frame may differ, for an intro or an outro. The tiny preview only
 // rules videos out for the parts check, since panels lose their edges at that size.
 async function checkVideo(previewUrl, largerUrl) {
-  const hits = await countVideoFrames(previewUrl, VIDEO_SAMPLES, SAMPLE_SIZE, (data, w, h) => isLightVideoFrame(measure(data, w, h)));
+  const hits = await countVideoFrames(previewUrl, VIDEO_SAMPLES, SAMPLE_SIZE, (data, w, h) => isLightVideoFrame({ ...measure(data, w, h), ...photoTraits(data, w, h) }));
   if (hits >= VIDEO_SAMPLES - 1) return true;
   if (!largerUrl || !await countPartFrames(previewUrl, SAMPLE_SIZE)) return false;
   return await countPartFrames(largerUrl, VIDEO_PART_SIZE) >= VIDEO_PART_HITS ? 'parts' : false;
+}
+
+// Whether a group of pixels has the many blended colors of a photo. Buttons, charts,
+// panels and headlines are mostly one color, however big they are.
+function isPhotoLike(data, queue, start, end) {
+  const bins = new Map();
+  for (let i = start; i < end; i++) {
+    const p = queue[i] * 4;
+    const bin = (data[p] >> 4) << 8 | (data[p + 1] >> 4) << 4 | data[p + 2] >> 4;
+    bins.set(bin, (bins.get(bin) || 0) + 1);
+  }
+  const counts = [...bins.values()].sort((a, b) => b - a);
+  if (counts[0] > (end - start) * 0.5) return false;
+  let covered = 0, used = 0;
+  while (covered < (end - start) * 0.9) covered += counts[used++];
+  return used >= PHOTO_MIN_COLORS;
+}
+
+// How much of the image is photo, once text and thin lines are off, and how much is one
+// of its three most common pale colors. A UI page is exact colors, while a pale sky or
+// wall drifts. A photo inverted is a negative, so neither may go through a plain invert.
+function photoTraits(data, width, height) {
+  const n = width * height;
+  let other = new Uint8Array(n);
+  const pale = new Uint32Array(262144);
+  for (let i = 0; i < n; i++) {
+    const r = data[i * 4], g = data[i * 4 + 1], b = data[i * 4 + 2];
+    if (0.299 * r + 0.587 * g + 0.114 * b >= 205 && Math.max(r, g, b) - Math.min(r, g, b) <= 48) pale[(r >> 2) << 12 | (g >> 2) << 6 | b >> 2]++;
+    else other[i] = 1;
+  }
+  other = shrunk(shrunk(other, width), width);
+  let photo = 0;
+  eachGroup(other, width, new Int32Array(n), (start, end, queue) => {
+    if (end - start >= n * PHOTO_MIN_GROUP && isPhotoLike(data, queue, start, end)) photo += end - start;
+  });
+  const top = [0, 0, 0];
+  for (const count of pale) {
+    if (count <= top[2]) continue;
+    top[2] = count;
+    top.sort((a, b) => b - a);
+  }
+  return { photo: photo / n, flatPage: (top[0] + top[1] + top[2]) / n };
 }
 
 async function analyzeBlob(blob) {
@@ -118,7 +168,7 @@ async function analyzeBlob(blob) {
   ctx.drawImage(bitmap, 0, 0, w, h);
   bitmap.close();
   const { data } = ctx.getImageData(0, 0, w, h);
-  return { ...measure(data, w, h), sides: paleSides(data, w, h), around: darkPanelKind(data, w, h) };
+  return { ...measure(data, w, h), ...photoTraits(data, w, h), sides: paleSides(data, w, h), around: darkPanelKind(data, w, h) };
 }
 
 // Some screenshots are a white page with dark panels and photos on it. Inverting the
@@ -130,7 +180,7 @@ const PARTIAL_MIN_LIGHT = 0.45;
 const PARTIAL_THIN_LINE = 2;
 
 function mayBePartial(stats) {
-  if (stats.tinted < PARTIAL_MIN_LIGHT || stats.colorful > 0.25) return false;
+  if (stats.tinted < PARTIAL_MIN_LIGHT || stats.colorful > 0.45 || stats.flatPage < FLAT_PAGE_MIN) return false;
   return !isLightScreenshot(stats, true) || stats.dark >= 0.06;
 }
 
@@ -287,6 +337,10 @@ function pageMask(data, width, height) {
   const boxes = [];
   eachGroup(solid, width, queue, (start, end) => {
     if (end - start < n * 0.004) return;
+    // Pale and flat, like a map or a card, is more page rather than a picture.
+    let sum = 0;
+    for (let i = start; i < end; i++) sum += 0.299 * data[queue[i] * 4] + 0.587 * data[queue[i] * 4 + 1] + 0.114 * data[queue[i] * 4 + 2];
+    if (sum / (end - start) >= 150 && !isPhotoLike(data, queue, start, end)) return;
     for (let i = start; i < end; i++) keep[queue[i]] = 1;
     if (end - start >= n * 0.03) boxes.push(...groupBoxes(queue.slice(start, end), width, n));
   });
@@ -302,16 +356,56 @@ function pageMask(data, width, height) {
   }
   for (let i = 0; i < n; i++) share += mask[i];
   // Text and icons on the page are what separate a screenshot from a product on white.
-  return { mask, share: share / n, ink: ink / page };
+  const small = other.slice(), glyphs = [];
+  for (let i = 0; i < n; i++) if (keep[i]) small[i] = 0;
+  eachGroup(small, width, queue, (start, end) => {
+    let x0 = width, x1 = 0, y0 = height, y1 = 0;
+    for (let i = start; i < end; i++) {
+      const x = queue[i] % width, y = (queue[i] - x) / width;
+      if (x < x0) x0 = x;
+      if (x > x1) x1 = x;
+      if (y < y0) y0 = y;
+      if (y > y1) y1 = y;
+    }
+    glyphs.push({ x0, x1, h: y1 - y0 + 1, cy: (y0 + y1) / 2 });
+  });
+  return { mask, share: share / n, ink: ink / page, lines: textLines(glyphs, height) };
 }
 
-function isPartialScreenshot({ share, ink }) {
-  return share >= 0.4 && share <= 0.95 && ink >= 0.02;
+function isPartialScreenshot({ share, ink, lines }) {
+  return share >= 0.4 && (ink >= 0.02 ? lines >= 2 : ink >= 0.005 && lines >= 5);
 }
 
 // mayBeFrame already looked at the shape, and a frame may have no text on it.
 function isFrameScreenshot({ share }) {
   return share >= 0.03 && share <= 0.5;
+}
+
+// Counts lines of text among small things: at least 5 of a similar height in a row, side
+// by side. A photo's specks and a hair's strands don't line up like that.
+function textLines(boxes, height) {
+  const glyphs = boxes.filter((b) => b.h >= 4 && b.h <= height * 0.12).slice(0, 5000);
+  glyphs.sort((a, b) => a.cy - b.cy);
+  const used = new Uint8Array(glyphs.length);
+  let lines = 0;
+  for (let i = 0; i < glyphs.length; i++) {
+    if (used[i]) continue;
+    const { cy, h } = glyphs[i], row = [];
+    for (let j = i; j < glyphs.length && glyphs[j].cy - cy <= h * 0.35; j++) {
+      if (!used[j] && glyphs[j].h >= h * 0.5 && glyphs[j].h <= h * 2) row.push(j);
+    }
+    row.sort((a, b) => glyphs[a].x0 - glyphs[b].x0);
+    let chain = [], best = [];
+    for (const j of row) {
+      if (chain.length && glyphs[j].x0 - glyphs[chain[chain.length - 1]].x1 > h * 3) chain = [];
+      chain.push(j);
+      if (chain.length > best.length) best = chain;
+    }
+    if (best.length < 5) continue;
+    lines++;
+    for (const j of best) used[j] = 1;
+  }
+  return lines;
 }
 
 // Takes a pixel off the edge of everything in the mask.
@@ -382,11 +476,39 @@ async function partialDarken(blob, accepts = isPartialScreenshot) {
   return dataUrl(out);
 }
 
+// A pale photo can be as flat as a page in the small copy: a laptop on a white desk. At
+// full size it has something in many tones on it and no line of text anywhere. Only a page
+// with little of one color needs this look, which saves most screenshots a fetch.
+const mayBePalePhoto = (stats) => stats.flatPage < 0.7 && isLightScreenshot(stats, true);
+async function isPalePhoto(blob) {
+  const bitmap = await createImageBitmap(blob);
+  const scale = Math.min(1, PARTIAL_SIZE / Math.max(bitmap.width, bitmap.height));
+  const w = Math.max(1, Math.round(bitmap.width * scale));
+  const h = Math.max(1, Math.round(bitmap.height * scale));
+  const ctx = new OffscreenCanvas(w, h).getContext('2d', { willReadFrequently: true });
+  ctx.drawImage(bitmap, 0, 0, w, h);
+  bitmap.close();
+  const { data } = ctx.getImageData(0, 0, w, h);
+  const found = pageMask(data, w, h);
+  if (!found || found.lines || found.share >= 0.93) return false;
+  // A chart has no text either, but its bars and lines are a few flat colors.
+  const tones = new Map();
+  let rest = 0;
+  for (let i = 0; i < w * h; i++) {
+    if (found.mask[i]) continue;
+    const key = (data[i * 4] >> 4) << 8 | (data[i * 4 + 1] >> 4) << 4 | data[i * 4 + 2] >> 4;
+    tones.set(key, (tones.get(key) || 0) + 1);
+    rest++;
+  }
+  const top = [...tones.values()].sort((a, b) => b - a).slice(0, 4).reduce((a, b) => a + b, 0);
+  return top < rest * 0.85;
+}
+
 // A dark panel shown off on something bright that isn't a page: a blurred screenshot
 // behind it, or a photo under a browser's pale toolbar. The panel stays as it is.
 const PANEL_GRID = 24;
 const PANEL_MIN_AREA = 0.05;
-const BAR_MIN = 0.03, BAR_MAX = 0.25;
+const BAR_MIN = 0.03, BAR_MAX = 0.25, BAR_GAP = 0.04;
 
 const isDarkPixel = (data, i) => 0.299 * data[i] + 0.587 * data[i + 1] + 0.114 * data[i + 2] < 80 &&
   Math.max(data[i], data[i + 1], data[i + 2]) - Math.min(data[i], data[i + 1], data[i + 2]) < 70;
@@ -518,12 +640,40 @@ function peakAround(data, width, height, box) {
   return lumas[Math.floor(lumas.length * 0.9)] || 0;
 }
 
+// The blurred page around a panel: big connected areas near the brightest gray, with the
+// smudges of text on them taken in. White furniture in a photo is too small to count.
+function blurredPage(data, width, height, box, peak) {
+  const n = width * height, on = new Uint8Array(n), queue = new Int32Array(n), page = new Uint8Array(n);
+  for (let i = 0; i < n; i++) {
+    const r = data[i * 4], g = data[i * 4 + 1], b = data[i * 4 + 2];
+    if (0.299 * r + 0.587 * g + 0.114 * b >= peak * 0.72 && Math.max(r, g, b) - Math.min(r, g, b) <= 40) on[i] = 1;
+  }
+  let total = 0;
+  eachGroup(on, width, queue, (start, end) => {
+    if (end - start < n * 0.02) return;
+    total += end - start;
+    for (let i = start; i < end; i++) page[queue[i]] = 1;
+  });
+  const boxArea = (box.x1 - box.x0 + 1) * (box.y1 - box.y0 + 1);
+  if (total < (n - boxArea) * 0.15) return null;
+  let mask = page;
+  const reach = Math.max(1, Math.round(Math.max(width, height) / 100));
+  for (let i = 0; i < reach; i++) mask = grown(mask, width);
+  const rest = new Uint8Array(n);
+  for (let i = 0; i < n; i++) rest[i] = mask[i] ? 0 : 1;
+  eachGroup(rest, width, queue, (start, end) => {
+    if (end - start < n * 0.03) for (let i = start; i < end; i++) mask[queue[i]] = 1;
+  });
+  return mask;
+}
+
 function darkPanelKind(data, width, height) {
   const panel = findPanel(data, width, height);
   const bar = topBar(data, width, height);
   // A panel floats. A dark photo under a meme's caption runs to the edges of the image.
   const floats = panel && panel.x0 > width * 0.01 && panel.x1 < width * 0.99 && panel.y1 < height * 0.99;
-  if (floats && bar >= BAR_MIN && bar <= BAR_MAX && panel.y0 >= height * bar - 2) return 'bar';
+  // An extension's popup hangs right off the toolbar.
+  if (floats && bar >= BAR_MIN && bar <= BAR_MAX && panel.y0 >= height * bar - 2 && panel.y0 <= height * (bar + BAR_GAP)) return 'bar';
   const box = sharpBox(data, width, height);
   if (!box) return null;
   // Already dark, or white and so a plain background rather than a washed-out blur.
@@ -543,6 +693,7 @@ async function darkenAroundPanel(blob, kind) {
   const data = ctx.getImageData(0, 0, w, h).data;
   const dark = new OffscreenCanvas(w, h);
   const darkCtx = dark.getContext('2d');
+  if (darkPanelKind(data, w, h) !== kind) { bitmap.close(); return null; }
   if (kind === 'bar') {
     // A few rows more for the toolbar's soft bottom edge.
     const bar = Math.round(topBar(data, w, h) * h) + 3;
@@ -552,16 +703,22 @@ async function darkenAroundPanel(blob, kind) {
     darkCtx.clearRect(0, bar, w, h - bar);
   } else {
     const box = sharpBox(data, w, h);
-    if (!box || darkPanelKind(data, w, h) !== 'blur') { bitmap.close(); return null; }
     // The blur is a washed-out page, mid-gray where it was white, and inverting mid-gray
     // leaves it mid-gray. Bringing its brightest back up to white first makes it go dark.
     // Blurred photos would turn into bright negatives, so each pixel gets whichever is
     // darker, itself or its dark version. Nothing gets brighter and no edges show.
-    const stretch = Math.min(2.4, 255 / peakAround(data, w, h, box));
+    const peak = peakAround(data, w, h, box);
+    const page = blurredPage(data, w, h, box, peak);
+    if (!page) { bitmap.close(); return null; }
+    const stretch = Math.min(3, 255 / (peak * 0.9));
     darkCtx.drawImage(bitmap, 0, 0, w, h);
     darkCtx.globalCompositeOperation = 'darken';
     darkCtx.filter = `brightness(${stretch.toFixed(2)}) ${DARK_FILTER}`;
     darkCtx.drawImage(bitmap, 0, 0, w, h);
+    // Only the page goes dark. Photos on it stay, and a soft edge matches the blur.
+    darkCtx.filter = `blur(${Math.max(1, Math.round(Math.max(w, h) / 270))}px)`;
+    darkCtx.globalCompositeOperation = 'destination-in';
+    darkCtx.drawImage(maskCanvas(page, w, h), 0, 0);
     darkCtx.filter = 'none';
     darkCtx.globalCompositeOperation = 'destination-out';
     darkCtx.beginPath();

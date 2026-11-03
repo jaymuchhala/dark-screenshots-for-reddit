@@ -27,6 +27,13 @@ async function checkImage(url, fullUrl) {
     const stats = await analyzeBlob(await res.blob());
     const framed = mayBeFrame(stats);
     const page = framed || mayBePartial(stats);
+    if (fullUrl && allowed(fullUrl) && !page && mayBePalePhoto(stats)) {
+      try {
+        const full = await fetch(fullUrl, { credentials: 'omit' });
+        if (full.ok && await isPalePhoto(await full.blob())) stats.photo = 1;
+      } catch {}
+      return stats;
+    }
     if (!fullUrl || !allowed(fullUrl) || !(page || stats.around)) return stats;
     try {
       const full = await fetch(fullUrl, { credentials: 'omit' });

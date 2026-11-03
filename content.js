@@ -652,7 +652,8 @@
       // GIFs would lose their animation.
       if (!/^image\/(png|jpeg|webp)$/.test(file.type) || file.size > MAX_UPLOAD_BYTES) return file;
       try {
-        if (!isLightScreenshot(await analyzeBlob(file), settings.tinted)) return file;
+        const stats = await analyzeBlob(file);
+        if (!isLightScreenshot(stats, settings.tinted) || (mayBePalePhoto(stats) && await isPalePhoto(file))) return file;
         const dark = await darkenBlob(file);
         changed++;
         return new File([dark], file.name, { type: dark.type, lastModified: file.lastModified });
