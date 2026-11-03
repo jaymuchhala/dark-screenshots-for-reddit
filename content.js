@@ -9,7 +9,7 @@
   const VIDEO_REVEAL_AFTER_MS = 6000;
   const MAX_SAVED_VIDEOS = 500;
 
-  let settings = { reader: true, readerMode: 'theme', videos: false, uploader: true, tinted: true };
+  let settings = { reader: true, readerMode: 'theme', videos: false, frames: true, uploader: true, tinted: true };
   let overrides = {};
   let savedVideos = {};   // video key -> verdict, so a reload needs no new check
   const systemDark = matchMedia('(prefers-color-scheme: dark)');
@@ -148,7 +148,7 @@
     const stats = verdicts.get(key);
     if (stats === null || (stats && !(stats instanceof Promise))) {
       // A video's verdict is already true or null. An image's depends on the settings.
-      const picture = usesPartial(stats, settings.tinted) ? stats.partial : null;
+      const picture = usesPartial(stats, settings.tinted, settings.frames) ? stats.partial : null;
       setDarkened(img, state, stats === true || !!picture || (!!stats && isLightScreenshot(stats, settings.tinted)), picture);
       setHidden(img, state, false);
       return true;

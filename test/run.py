@@ -100,6 +100,8 @@ MAKE = """async () => {
     mk('neg-red-heatmap.png', 1100, 600, (x,w,h)=>{ x.fillStyle='#000'; x.fillRect(0,0,w,h); for(let i=0;i<30;i++) for(let j=0;j<16;j++){ x.fillStyle='#7f1820'; x.fillRect(i*37+1,j*37+1,35,35); x.fillStyle='#eee'; x.fillRect(i*37+12,j*37+12,12,12); } }),
     mk('neg-white-sky.jpg', 900, 600, (x,w,h)=>{ x.fillStyle='#fff'; x.fillRect(0,0,w,h); noise(x,0,330,900,270,[90,110,70]); }, 'image/jpeg'),
     ...[['partial-photos.png', true], ['partial-strict.png', false], ['partial-cream.png', false, '#feecdc']].map(([name, photos, page]) => mk(name, 1200, 800, (x,w,h)=>{ x.fillStyle=page||'#fff'; x.fillRect(0,0,w,h); x.fillStyle='#222'; x.font='18px sans-serif'; for(let i=0;i<26;i++) x.fillText('Lorem ipsum dolor sit amet, consectetur adipiscing elit',30,430+i*14+(i%2)); if(photos){ noise(x,30,30,400,330,[150,130,110]); noise(x,460,30,400,330,[120,140,150]); } x.fillStyle='#14202e'; x.fillRect(900,60,270,photos?360:300); x.fillStyle='#eee'; for(let i=0;i<9;i++) x.fillText('Panel row '+i,920,100+i*30); })),
+    mk('frame-dark.png', 1200, 800, (x,w,h)=>{ x.fillStyle='#ecece4'; x.fillRect(0,0,w,h); x.fillStyle='#333'; x.font='18px sans-serif'; x.fillText('IMAGE 01',50,30); x.fillStyle='#111'; x.fillRect(50,45,1100,330); x.fillStyle='#333'; x.fillText('IMAGE 02',50,405); x.fillStyle='#111'; x.fillRect(50,420,1100,340); x.fillStyle='#ddd'; x.fillText('Dark panel text',100,120); }),
+    mk('neg-caption-bars.png', 1200, 800, (x,w,h)=>{ x.fillStyle='#fff'; x.fillRect(0,0,w,h); x.fillStyle='#111'; x.fillRect(0,110,w,580); x.font='40px sans-serif'; x.fillText('top text',60,70); x.fillText('bottom text',60,760); }),
     mk('pos-text-ui.png', 900, 500, (x,w,h)=>{ x.fillStyle='#fff'; x.fillRect(0,0,w,h); x.fillStyle='#222'; x.font='18px sans-serif'; for(let i=0;i<20;i++) x.fillText('Lorem ipsum dolor sit amet, consectetur adipiscing elit, sed do eiusmod tempor',20,26+i*24); }),
   ]);
 }"""
@@ -200,6 +202,19 @@ with sync_playwright() as p:
     check('tinted off still darkens white', 'invert' in page.locator('img[alt="shot1.png"]').evaluate(FILTERED))
     sw.evaluate("chrome.storage.local.set({settings:{tinted:true}})"); page.wait_for_timeout(300)
     check('tinted on darkens the cream chart', 'invert' in page.locator('img[alt="pos-cream-chart.png"]').evaluate(FILTERED))
+
+    # A pale frame around a dark image
+    frame = page.locator('img[alt="frame-dark.png"]')
+    frame.scroll_into_view_if_needed()
+    check('frame: partly dark, no filter', 'url("data:image/webp' in frame.evaluate("el => el.style.content") and not frame.evaluate(FILTERED))
+    check('frame: frame darkened', max(px('frame-dark.png', .5, .97)) < 60, px('frame-dark.png', .5, .97))
+    check('frame: dark panel stays dark', max(px('frame-dark.png', .5, .3)) < 40, px('frame-dark.png', .5, .3))
+    caption = page.locator('img[alt="neg-caption-bars.png"]')
+    check('caption bars on two sides: left alone', not caption.evaluate("el => el.style.content") and not caption.evaluate(FILTERED))
+    sw.evaluate("chrome.storage.local.set({settings:{frames:false}})"); page.wait_for_timeout(300)
+    check('frames off leaves the frame', not frame.evaluate("el => el.style.content") and not frame.evaluate(FILTERED))
+    sw.evaluate("chrome.storage.local.set({settings:{frames:true}})"); page.wait_for_timeout(300)
+    check('frames back on darkens it again', 'url(' in frame.evaluate("el => el.style.content"))
 
     # Partly dark images and the settings and override
     partial = page.locator('img[alt="partial-cream.png"]')
@@ -425,6 +440,9 @@ with sync_playwright() as p:
     pop.locator('#videos').click(); pop.wait_for_timeout(100)
     check('popup: checkbox saves', sw.evaluate("chrome.storage.local.get('settings')")['settings']['videos'] is True)
     pop.screenshot(path=f'{work}/popup-on.png')
+    check('popup: frames starts ticked', pop.locator('#frames').is_checked())
+    pop.locator('#frames').click(); pop.wait_for_timeout(100)
+    check('popup: frames saves', sw.evaluate("chrome.storage.local.get('settings')")['settings']['frames'] is False)
 
     ctx.close()
 print('\nFAILED:', fails if fails else 'none')

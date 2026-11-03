@@ -100,7 +100,8 @@ async function analyzeBlob(blob) {
   const ctx = canvas.getContext('2d', { willReadFrequently: true });
   ctx.drawImage(bitmap, 0, 0, w, h);
   bitmap.close();
-  return measure(ctx.getImageData(0, 0, w, h).data, w, h);
+  const { data } = ctx.getImageData(0, 0, w, h);
+  return { ...measure(data, w, h), sides: paleSides(data, w, h) };
 }
 
 // Some screenshots are a white page with dark panels and photos on it. Inverting the
@@ -116,8 +117,38 @@ function mayBePartial(stats) {
 }
 
 // With the tinted setting off, a cream page isn't darkened.
-function usesPartial(stats, allowTinted) {
-  return !!stats?.partial && (allowTinted || stats.light >= PARTIAL_MIN_LIGHT);
+function usesPartial(stats, allowTinted, allowFrames) {
+  if (!stats?.partial || (stats.framed && !allowFrames)) return false;
+  return allowTinted || stats.light >= (stats.framed ? FRAME_MIN_LIGHT : PARTIAL_MIN_LIGHT);
+}
+
+// A dark image can sit on a pale frame. Only the frame gets darkened, so the image
+// doesn't turn white. A side counts if a line near that edge is almost all pale, and a
+// crop can cut one side off. A meme's caption bars only reach two sides.
+const FRAME_MIN_DARK = 0.5;
+const FRAME_MIN_LIGHT = 0.03;
+const FRAME_EDGE = 0.03;
+
+function paleSides(data, width, height) {
+  const pale = (x, y) => {
+    const i = (y * width + x) * 4, r = data[i], g = data[i + 1], b = data[i + 2];
+    return 0.299 * r + 0.587 * g + 0.114 * b >= 205 && Math.max(r, g, b) - Math.min(r, g, b) <= 48;
+  };
+  const side = (depth, length, at) => {
+    for (let d = 0; d < depth; d++) {
+      let count = 0;
+      for (let t = 0; t < length; t++) if (at(d, t)) count++;
+      if (count >= length * 0.85) return 1;
+    }
+    return 0;
+  };
+  const deepX = Math.ceil(width * FRAME_EDGE), deepY = Math.ceil(height * FRAME_EDGE);
+  return side(deepY, width, (d, t) => pale(t, d)) + side(deepY, width, (d, t) => pale(t, height - 1 - d)) +
+    side(deepX, height, (d, t) => pale(d, t)) + side(deepX, height, (d, t) => pale(width - 1 - d, t));
+}
+
+function mayBeFrame(stats) {
+  return stats.sides >= 3 && stats.dark >= FRAME_MIN_DARK && stats.tinted < PARTIAL_MIN_LIGHT && stats.colorful <= 0.25;
 }
 
 // Calls found(start, end) for each 4-connected group of pixels with `want` set.
@@ -206,6 +237,11 @@ function isPartialScreenshot({ share, ink }) {
   return share >= 0.4 && share <= 0.95 && ink >= 0.02;
 }
 
+// mayBeFrame already looked at the shape, and a frame may have no text on it.
+function isFrameScreenshot({ share }) {
+  return share >= 0.03 && share <= 0.5;
+}
+
 // Grows the mask by a pixel, because the pixels at an edge are a blend that isn't
 // page-colored and would otherwise stay as a bright outline.
 function grown(mask, width) {
@@ -218,7 +254,7 @@ function grown(mask, width) {
 }
 
 // Returns the partly dark picture as a data URL, or null if it isn't that kind of image.
-async function partialDarken(blob) {
+async function partialDarken(blob, accepts = isPartialScreenshot) {
   const bitmap = await createImageBitmap(blob);
   const scale = Math.min(1, PARTIAL_SIZE / Math.max(bitmap.width, bitmap.height));
   const w = Math.max(1, Math.round(bitmap.width * scale));
@@ -227,7 +263,7 @@ async function partialDarken(blob) {
   const ctx = picture.getContext('2d', { willReadFrequently: true });
   ctx.drawImage(bitmap, 0, 0, w, h);
   const found = pageMask(ctx.getImageData(0, 0, w, h).data, w, h);
-  if (!found || !isPartialScreenshot(found)) {
+  if (!found || !accepts(found)) {
     bitmap.close();
     return null;
   }

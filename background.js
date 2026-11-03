@@ -25,10 +25,12 @@ async function checkImage(url, fullUrl) {
     const res = await fetch(url, { credentials: 'omit' });
     if (!res.ok) return null;
     const stats = await analyzeBlob(await res.blob());
-    if (!fullUrl || !allowed(fullUrl) || !mayBePartial(stats)) return stats;
+    const framed = mayBeFrame(stats);
+    if (!fullUrl || !allowed(fullUrl) || !(framed || mayBePartial(stats))) return stats;
     try {
       const full = await fetch(fullUrl, { credentials: 'omit' });
-      if (full.ok) stats.partial = await partialDarken(await full.blob());
+      if (full.ok) stats.partial = await partialDarken(await full.blob(), framed ? isFrameScreenshot : undefined);
+      stats.framed = framed;
     } catch {}
     return stats;
   });
