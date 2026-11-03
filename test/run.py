@@ -258,6 +258,8 @@ with sync_playwright() as p:
         check('waiting image: tiny image has no icon', style(page.locator('#tiny'), 'background-image') == '')
         clipped = style(page.locator('#clipped'), 'background-image')
         check('waiting image: top clip and side bar count', 'y%3D%2254%22' in clipped and 'x%3D%22-34%22' in clipped, clipped[:80])
+        page.evaluate("() => { const img = document.querySelector('#clipped'); img.parentElement.style.width = '968px'; img.style.width = '382px'; }")
+        check('waiting image: follows a new layout, wide bars ignored', lambda: 'y%3D%2222%22' in style(page.locator('#clipped'), 'background-image') and 'x%3D%22-34%22' in style(page.locator('#clipped'), 'background-image'))
         check('waiting image: has the label', 'Dark%20mode.' in style(wait, 'background-image'))
         check('waiting image: small image has the icon without the label', 'image/svg' in style(page.locator('#small'), 'background-image') and 'Dark%20mode.' not in style(page.locator('#small'), 'background-image'))
         a = wait.screenshot(path=f'{work}/waiting.png')

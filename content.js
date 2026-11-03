@@ -2,7 +2,7 @@
   const IMAGE_HOSTS = new Set(['i.redd.it', 'preview.redd.it', 'external-preview.redd.it']);
   const MIN_WIDTH = 80, MIN_HEIGHT = 50;
   const LABEL_MIN_WIDTH = 80, LABEL_MIN_HEIGHT = 60;
-  const WAITING_INSET = 14, WAITING_MAX_TOP = 64;
+  const WAITING_INSET = 14, WAITING_MAX_BAR = 50;
   const REVEAL_AFTER_MS = 2500;
   const MAX_UPLOAD_BYTES = 30 * 1024 * 1024;
   const MAX_OVERRIDES = 500;
@@ -82,8 +82,8 @@
   }
 
   // Where the waiting picture's icon goes, in from the top right corner of what's on show.
-  // An ancestor can clip the box, and a tall image is centered with bars beside it that look
-  // just like its dark box, so the top matches the distance to the edge beyond the bar.
+  // An ancestor can clip the box. A narrow bar beside a centered image looks like part of its
+  // dark box, so the top matches the distance to the edge beyond the bar. A wide bar doesn't.
   function waitingInsets(el, box) {
     let top = 0, right = 0;
     for (let a = el.parentElement || el.getRootNode().host; a && a !== document.body; a = a.parentElement || a.getRootNode().host) {
@@ -96,7 +96,7 @@
     const parent = el.parentElement && el.parentElement !== document.body ? el.parentElement.getBoundingClientRect() : box;
     const bar = parent.right - box.right;
     const centered = bar > 0 && Math.abs(bar - (box.left - parent.left)) < 2;
-    return { top: top + Math.min(WAITING_INSET + (centered ? bar : 0), WAITING_MAX_TOP), right: right + WAITING_INSET };
+    return { top: Math.round(top + WAITING_INSET + (centered && bar <= WAITING_MAX_BAR ? bar : 0)), right: Math.round(right + WAITING_INSET) };
   }
 
   // What a waiting image or video shows: a dark box with the icon and "Dark mode..."
@@ -152,6 +152,21 @@
     };
   }
 
+  // Reddit lays an image out again as it loads, so the picture follows its box and parent.
+  function followLayout(el, state) {
+    const name = el.localName === 'img' ? 'background-image' : '--dark-screenshots-waiting';
+    if (!(name in holdStyles(el))) return;
+    state.picture = el.style.getPropertyValue(name);
+    state.layout = new ResizeObserver(() => {
+      const picture = waitingPicture(el);
+      if (picture === state.picture) return;
+      state.picture = picture;
+      el.style.setProperty(name, picture, 'important');
+    });
+    state.layout.observe(el);
+    if (el.parentElement) state.layout.observe(el.parentElement);
+  }
+
   function setHidden(img, state, hidden) {
     if (state.hidden === hidden) return;
     state.hidden = hidden;
@@ -161,7 +176,9 @@
         state.held[name] = img.style.getPropertyValue(name);
         img.style.setProperty(name, value, 'important');
       }
+      followLayout(img, state);
     } else {
+      state.layout?.disconnect();
       for (const [name, value] of Object.entries(state.held)) {
         img.style.removeProperty(name);
         if (value) img.style.setProperty(name, value);
